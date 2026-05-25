@@ -89,7 +89,11 @@ vkd3d_src = [
   'swapchain.c',
   'queue_timeline.c',
   'address_binding_tracker.c',
-  'workgraphs.c'
+  'workgraphs.c',
+  'framepacer/framepacer_bridge.cpp',
+  'framepacer/framepacer.cpp',
+  'framepacer/calibrated_device_timestamps.cpp',
+  'framepacer/util/util_sleep.cpp'
 ]
 
 if enable_renderdoc

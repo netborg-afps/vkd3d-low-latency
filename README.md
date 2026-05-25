@@ -1,4 +1,29 @@
-# vkd3d-proton
+# vkd3d-low-latency
+
+Enhances [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) with low-latency frame pacing capabilities to improve game responsiveness and input lag. It also improves latency stability over time, usually resulting in a more accurate playback speed of the generated video.
+
+## Status
+
+It is in a very early state, moving over the frame pacing of [dxvk-low-latency](https://github.com/netborg-afps/dxvk-low-latency) step by step. Expect bugs as I'm getting familiar with the VKD3D codebase and the dx12 environment.
+
+In dx12, there are basically three main ways to achieve proper mouse input and input lag reduction. We're starting by integrating the pacing into the NVIDIA Reflex API. AMD Anti-lag 2 and Waitable DXGI Swapchains will follow later. 
+
+### Modes
+
+The only integrated mode right now is `min-latency`. It serves as a reference for the lowest input lag possible, but at the cost of severely dropped fps. This mode starts a frame when the previous frame got finished on the GPU, thus heavily restricting hardware parallelism. Currently it technically only provides lowest latency possibly with v-sync, because render-finished signalling is not implemented yet and v-sync assures vkWaitForPresent is being called.
+
+Step by step, the `low-latency` and `low-latency-vrr` modes are being integrated - which are much more sophisticated and typically aim for 95-99% GPU load in the GPU limited scenario and aim to achieve the same input lag than `min-latency`.
+
+## Motivation
+
+NVIDIA Reflex does still not work correctly in VKD3D after having been available for two years. I'm not convinced that proper frame pacing can be accomplished with `VK_NV_low_latency2` alone, as dxvk-low-latency outperforms the VKD3D-Reflex configuration in terms of input lag in a selection of games where both technologies are supported (Examples: The Finals and Overwatch 2). The pacing has to know about the VKD3D-internal threading timing to be truely effective.
+
+Furthermore are a lot of games relying on VKD3D's pacing via Microsoft's Waitable DXGI Swapchains, which we'll support too eventually.
+
+As a bonus, this pacing is hardware-agnostic and can be used on NVIDIA, AMD, Intel, etc.
+
+
+# vkd3d-proton (Original Description)
 
 vkd3d-proton is a fork of VKD3D, which aims to implement the full Direct3D 12 API on top of Vulkan.
 The project serves as the development effort for Direct3D 12 support in [Proton](https://github.com/ValveSoftware/Proton).

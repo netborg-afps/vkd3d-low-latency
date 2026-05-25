@@ -32,6 +32,9 @@ add_project_arguments('-DPACKAGE_VERSION="' + meson.project_version() + '"',   l
 
 if vkd3d_platform == 'windows'
   add_project_arguments('-D_WIN32_WINNT=0x600', language : 'c')
+  if vkd3d_is_msvc
+    add_project_arguments('-DNOMINMAX', language : 'cpp')
+  endif
 endif
 
 if enable_profiling
@@ -111,7 +114,6 @@ add_project_arguments(vkd3d_compiler.get_supported_arguments([
     '-Wno-format-truncation',
     '-Wno-missing-field-initializers',
     '-Wno-unused-parameter',
-    '-Wdeclaration-after-statement',
     '/wd4244', # Narrowing conversion
     '/wd4101', # Unreferenced local variable
     '/wd4267', # Another narrowing conversion
@@ -119,6 +121,11 @@ add_project_arguments(vkd3d_compiler.get_supported_arguments([
     '/wd4334', # Result of 32-bit shift cast to 64-bit
     '/wd4146', # Unary minus on unsigned
     '/wd4305', # Truncation from double to float
+    ]),
+  language : [ 'c', 'cpp' ])
+
+add_project_arguments(vkd3d_compiler.get_supported_arguments([
+    '-Wdeclaration-after-statement',
     ]),
   language : 'c')
 
@@ -147,6 +154,7 @@ if not vkd3d_is_msvc
 endif
 
 if vkd3d_platform == 'windows'
+  add_global_link_arguments('-lsynchronization', language : [ 'cpp' ])
   if vkd3d_compiler.has_link_argument('-static')
     add_global_link_arguments('-static', language : [ 'c', 'cpp' ])
   endif
