@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <atomic>
+#include "../util_log.h"
 
 
 namespace dxvk::sync {
@@ -52,8 +53,7 @@ namespace dxvk::sync {
       Indices desired;
 
       if (unlikely(expected.consumer != index)) {
-//        Logger::err( str::format( "RingbufferAllocator expected release ",
-//          expected.consumer, ", got ", index ) );
+        ERR( "RingbufferAllocator expected release %" PRIu16 ", got %i \n", expected.consumer, index );
       }
 
       do {
@@ -63,7 +63,7 @@ namespace dxvk::sync {
       } while (!m_indices.compare_exchange_weak( expected, desired ));
 
       if (unlikely(desired.allocCount < 0)) {
-//        Logger::err( "RingbufferAllocator allocCount < 0" );
+        ERR( "RingbufferAllocator allocCount < 0 \n" );
       }
     }
 
@@ -82,14 +82,15 @@ namespace dxvk::sync {
       auto t2 = high_resolution_clock::now();
       if (std::chrono::duration_cast<std::chrono::milliseconds>(
         t2 - allocTime).count() > 1000) {
-//        throw DxvkError("RingbufferAllocator could not allocate");
+          ERR("RingbufferAllocator could not allocate \n");
+          while (true) {}
       }
     }
 
     struct Indices {
-      uint16_t producer = 0;
-      uint16_t consumer = 1;
-      int32_t allocCount = 0;
+      uint16_t producer  = { 0 };
+      uint16_t consumer  = { 1 };
+      int32_t allocCount = { 0 };
     };
 
     std::atomic<Indices> m_indices;

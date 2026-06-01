@@ -8,7 +8,7 @@ static std::atomic<bool> NvApi_sleepEnabled;
 
 PacerHandle pacer_create( struct PacerDevice* device ) {
     INFO( "pacer_create start \n" );
-    PacerHandle res = new NvApi_PacingAdapter( nullptr );
+    PacerHandle res = new NvApi_PacingAdapter( device );
     INFO( "pacer_create done \n" );
     return res;
 }
@@ -54,4 +54,8 @@ void pacer_notify_gpu_execution_end( PacerHandle handle, pacer_frame_id_t frameI
 
 void pacer_notify_gpu_present_end( PacerHandle handle, pacer_frame_id_t frameId ) {
     // do nothing for now
+}
+
+struct PacerQueryPool* pacer_alloc_submit_query_pool( PacerHandle handle ) {
+    return PACER(handle)->m_pacer.allocSubmitQueryPool();
 }

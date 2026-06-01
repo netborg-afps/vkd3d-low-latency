@@ -9,6 +9,8 @@
 #endif
 
 #include "../util_time.h"
+#include "../util_log.h"
+#include "../util_likely.h"
 #include "../thread.h"
 
 namespace dxvk::sync {
@@ -81,31 +83,22 @@ namespace dxvk::sync {
     }
 
     void wait(uint64_t value) {
-      uint64_t cur = m_value.load(std::memory_order_acquire);
-      while (cur < value) {
-        WaitOnAddress(&m_value, &cur, sizeof(uint64_t), INFINITE);
-        cur = m_value.load(std::memory_order_acquire);
-      }
+      wait(value, INFINITE);
     }
 
     void wait(uint64_t value, DWORD timeout) {
-      using namespace std::chrono;
-      high_resolution_clock::time_point now = high_resolution_clock::now();
-      high_resolution_clock::time_point t = now + milliseconds(timeout);
-
-      while (true) {
-        uint64_t cur = m_value.load(std::memory_order_acquire);
-        if (cur >= value)
-          break;
-
-        DWORD dur = duration_cast<milliseconds>(t-now).count();
-        if (dur > 0)
-          WaitOnAddress(&m_value, &cur, sizeof(uint64_t), dur);
-
-        now = high_resolution_clock::now();
-        if (now > t)
-          break;
+      std::chrono::milliseconds ms(timeout-1);
+      high_resolution_clock::time_point t0 = high_resolution_clock::now();
+      high_resolution_clock::time_point t1 = t0;
+      uint64_t cur = m_value.load(std::memory_order_acquire);
+      while (cur < value &&
+          std::chrono::duration_cast<std::chrono::milliseconds>(t1-t0) < ms) {
+        WaitOnAddress(&m_value, &cur, sizeof(uint64_t), timeout);
+        cur = m_value.load(std::memory_order_acquire);
+        t1 = high_resolution_clock::now();
       }
+      if (unlikely(std::chrono::duration_cast<std::chrono::milliseconds>(t1-t0) >= ms))
+          WARN( "TIMEOUT REACHED, POSSIBLE STUTTER \n" );
     }
 
   private:

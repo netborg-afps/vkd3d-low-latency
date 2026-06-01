@@ -14,6 +14,9 @@ The only integrated mode right now is `min-latency`. It serves as a reference fo
 
 Step by step, the `low-latency` and `low-latency-vrr` modes are being integrated - which are much more sophisticated and typically aim for 95-99% GPU load in the GPU limited scenario and aim to achieve the same input lag than `min-latency`.
 
+Update: `low-latency` is now also supported!
+This version is still **not expected** to be stable across the board, but it seems to be stable for me testing 4 different games on my system (RTX 3080).
+
 ## Motivation
 
 NVIDIA Reflex does still not work correctly in VKD3D after having been available for two years. I'm not convinced that proper frame pacing can be accomplished with `VK_NV_low_latency2` alone, as dxvk-low-latency outperforms the VKD3D-Reflex configuration in terms of input lag in a selection of games where both technologies are supported (Examples: The Finals and Overwatch 2). The pacing has to know about the VKD3D-internal threading timing to be truely effective.

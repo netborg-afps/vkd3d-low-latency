@@ -1,17 +1,21 @@
 #include "calibrated_device_timestamps.h"
+#include "util/util_log.h"
+#include "util/util_likely.h"
 #include <vector>
 
 namespace dxvk {
 
-  CalibratedDeviceTimestamps::CalibratedDeviceTimestamps( DxvkDevice* device )
-  : m_device(device)
-  , m_canEnable(false) {
+  CalibratedDeviceTimestamps::CalibratedDeviceTimestamps( PacerDevice* device )
+  : m_device(*device),
+    m_timestampPeriod(device->timestampPeriod),
+    m_timestampValidBits(device->timestampValidBits),
+    m_canEnable( device->khrCalibratedTimestamps && m_timestampValidBits == 64 ) {
+
     m_enabled = false;
-    // ,
-    // m_timestampPeriod(device->adapter()->deviceProperties().core.properties.limits.timestampPeriod),
-    // m_timestampValidBits(device->adapter()->getTimestampValidBits()),
-    // m_canEnable( (m_device->features().khrCalibratedTimestamps || m_device->features().extCalibratedTimestamps) &&
-               // m_timestampValidBits == 64 ) {
+    if (m_canEnable)
+      INFO( "CalibratedDeviceTimestamps are supported for frame pacing \n" );
+    else
+      INFO( "CalibratedDeviceTimestamps are NOT supported. Frame pacing will be suboptimal. \n" );
 
     // if (!m_device->features().khrCalibratedTimestamps && !m_device->features().extCalibratedTimestamps) {
     //   Logger::warn( "Neither VK_KHR_calibrated_timestamps nor VK_EXT_calibrated_timestamps enabled. "
@@ -49,8 +53,8 @@ namespace dxvk {
     // if (!foundDeviceTimeDomain)
     //   Logger::err( "VK_TIME_DOMAIN_DEVICE_KHR is not reported by vkGetPhysicalDeviceCalibrateableTimeDomains, "
     //     "possibly a Vulkan driver bug" );
-    //
-    // calibrate();
+
+    calibrate();
 
   }
 
@@ -60,46 +64,45 @@ namespace dxvk {
     if (!m_enabled)
       return;
 
-    // Calibration nextCalibration;
-    //
-    // // we are only interested in the device "now" timestamp via Vulkan
-    // // since getting the host timestamp directly proved to be more reliable
-    // // possibly because of how the GPU driver interacts with Wine
-    // VkCalibratedTimestampInfoKHR calibratedTimestampInfo;
-    // calibratedTimestampInfo.sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
-    // calibratedTimestampInfo.pNext = nullptr;
-    // calibratedTimestampInfo.timeDomain = VK_TIME_DOMAIN_DEVICE_KHR;
-    //
-    // VkResult res = m_fpGetCalibratedTimestamps(
-    //   m_device->handle(), 1,
-    //   &calibratedTimestampInfo,
-    //   &nextCalibration.deviceTimestamp,
-    //   &nextCalibration.maxDeviation
-    // );
-    //
-    // nextCalibration.hostTimestamp = high_resolution_clock::now();
-    //
-    // if (unlikely(res != VK_SUCCESS)) {
-    //   Logger::err( "Failed to calibrate timestamp" );
-    //   return;
-    // }
-    //
-    // m_calibration = nextCalibration;
+    Calibration nextCalibration;
+
+    // we are only interested in the device "now" timestamp via Vulkan
+    // since getting the host timestamp directly proved to be more reliable
+    // possibly because of how the GPU driver interacts with Wine
+    VkCalibratedTimestampInfoKHR calibratedTimestampInfo;
+    calibratedTimestampInfo.sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
+    calibratedTimestampInfo.pNext = nullptr;
+    calibratedTimestampInfo.timeDomain = VK_TIME_DOMAIN_DEVICE_KHR;
+
+    VkResult res = m_device.vkGetCalibratedTimestampsKHR(
+      m_device.device, 1,
+      &calibratedTimestampInfo,
+      &nextCalibration.deviceTimestamp,
+      &nextCalibration.maxDeviation
+    );
+
+    nextCalibration.hostTimestamp = high_resolution_clock::now();
+
+    if (unlikely(res != VK_SUCCESS)) {
+      ERR( "Failed to calibrate timestamp \n" );
+      return;
+    }
+
+    // todo: make this thread-safe
+    m_calibration = nextCalibration;
 
   }
 
 
   CalibratedDeviceTimestamps::time_point CalibratedDeviceTimestamps::getHostTimestamp( uint64_t deviceTimestamp ) const {
 
-    // if (unlikely(m_calibration.deviceTimestamp == 0))
-    //   return time_point{};
-    //
-    // int64_t deltaDeviceTicks = deviceTimestamp - m_calibration.deviceTimestamp;
-    // int64_t deltaDeviceNanoseconds = deltaDeviceTicks * m_timestampPeriod;
-    //
-    // return m_calibration.hostTimestamp + high_resolution_clock::nanoseconds( deltaDeviceNanoseconds );
+    if (unlikely(m_calibration.deviceTimestamp == 0))
+      return time_point{};
 
-    return time_point{};
+    int64_t deltaDeviceTicks = deviceTimestamp - m_calibration.deviceTimestamp;
+    int64_t deltaDeviceNanoseconds = deltaDeviceTicks * m_timestampPeriod;
+
+    return m_calibration.hostTimestamp + high_resolution_clock::nanoseconds( deltaDeviceNanoseconds );
 
   }
 

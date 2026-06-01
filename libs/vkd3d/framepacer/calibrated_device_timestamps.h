@@ -1,11 +1,9 @@
 #pragma once
 
 #include "util/util_time.h"
-//#include "../vulkan/vulkan_loader.h"
+#include "framepacer/framepacer_bridge.h"
 
 namespace dxvk {
-
-  class DxvkDevice;
 
   /*
    * Clock synchronization for GPU/CPU via the VK_KHR_calibrated_timestamps
@@ -24,7 +22,7 @@ namespace dxvk {
   public:
     using time_point = high_resolution_clock::time_point;
 
-    CalibratedDeviceTimestamps( DxvkDevice* device );
+    CalibratedDeviceTimestamps( PacerDevice* device );
     ~CalibratedDeviceTimestamps() { }
 
     void enable() { m_enabled = m_canEnable; }
@@ -37,19 +35,19 @@ namespace dxvk {
 
     struct Calibration {
       using time_point = high_resolution_clock::time_point;
-      uint64_t deviceTimestamp  = 0;
-      uint64_t maxDeviation     = 0;
-      time_point hostTimestamp  = time_point{};
+      uint64_t deviceTimestamp  = { 0 };
+      uint64_t maxDeviation     = { 0 };
+      time_point hostTimestamp  = { time_point{} };
     };
 
-    DxvkDevice* m_device;
-    Calibration m_calibration;
-    bool        m_enabled = false;
+    PacerDevice   m_device;
+    Calibration   m_calibration;
+    bool          m_enabled;
 
     // PFN_vkGetCalibratedTimestampsKHR m_fpGetCalibratedTimestamps = nullptr;
 
-    // const float    m_timestampPeriod;
-    // const uint32_t m_timestampValidBits;
+    const float    m_timestampPeriod;
+    const uint32_t m_timestampValidBits;
     const bool     m_canEnable;
 
   };

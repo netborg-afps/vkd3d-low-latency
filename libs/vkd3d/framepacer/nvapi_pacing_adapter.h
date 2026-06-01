@@ -174,7 +174,7 @@ public:
             m_pacer.finishRender(frameId);
         }
 
-        m_pacer.notifyGpuExecutionEnd( pacerId, nullptr );
+        m_pacer.notifyGpuExecutionEnd( pacerId, queryPool );
     }
 
     void setLatencyMarker( uint64_t nvId, VkLatencyMarkerNV marker ) {

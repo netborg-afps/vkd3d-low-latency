@@ -8,8 +8,28 @@
 extern "C" {
 #endif
 
-struct PacerDevice { };
-struct PacerQueryPool { };
+struct PacerDevice {
+    VkDevice device;
+    uint32_t graphicsQueueFamilyIndex;
+    float timestampPeriod;
+    uint32_t timestampValidBits;
+    bool khrCalibratedTimestamps;
+    PFN_vkCreateQueryPool vkCreateQueryPool;
+    PFN_vkGetQueryPoolResults vkGetQueryPoolResults;
+    PFN_vkCreateCommandPool vkCreateCommandPool;
+    PFN_vkAllocateCommandBuffers vkAllocateCommandBuffers;
+    PFN_vkBeginCommandBuffer vkBeginCommandBuffer;
+    PFN_vkCmdResetQueryPool vkCmdResetQueryPool;
+    PFN_vkCmdWriteTimestamp2 vkCmdWriteTimestamp2;
+    PFN_vkEndCommandBuffer vkEndCommandBuffer;
+    PFN_vkGetCalibratedTimestampsKHR vkGetCalibratedTimestampsKHR;
+    PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR vkGetPhysicalDeviceCalibrateableTimeDomainsKHR;
+};
+
+struct PacerQueryPool {
+    VkQueryPool     pool;
+    VkCommandBuffer buffer;
+};
 
 typedef void* PacerHandle;
 typedef uint64_t pacer_frame_id_t;
@@ -33,6 +53,8 @@ void pacer_notify_gpu_execution_end( PacerHandle handle, pacer_frame_id_t frameI
 
 // assumes presentation to single swapchain for now
 void pacer_notify_gpu_present_end( PacerHandle handle, pacer_frame_id_t frameId );
+
+struct PacerQueryPool* pacer_alloc_submit_query_pool( PacerHandle handle );
 
 
 #ifdef __cplusplus

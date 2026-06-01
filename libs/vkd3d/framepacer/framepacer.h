@@ -10,7 +10,6 @@
 #include "calibrated_device_timestamps.h"
 #include "util/sync/sync_ringbuffer_allocator.h"
 #include "util/util_log.h"
-#include <cinttypes>
 
 
 /* \brief Frame pacer interface managing the CPU - GPU synchronization.
@@ -27,8 +26,11 @@ namespace dxvk {
 
 
   class FramePacer {
+
     using microseconds = std::chrono::microseconds;
     using time_point   = high_resolution_clock::time_point;
+    using QueryPool    = PacerQueryPool;
+
   public:
 
     FramePacer( PacerDevice* device, uint64_t firstFrameId );
@@ -51,6 +53,7 @@ namespace dxvk {
       m_latencyMarkersStorage.registerFrameEnd(frameId);
       m_mode->endFrame(frameId);
       m_frameSync.signalFrameFinished(frameId);
+
       trackStats(frameId);
     }
 
@@ -106,7 +109,7 @@ namespace dxvk {
       }
     }
 
-    void notifyGpuExecutionEnd( uint64_t frameId, VkQueryPool* queryPool ) {
+    void notifyGpuExecutionEnd( uint64_t frameId, QueryPool* queryPool ) {
       LatencyMarkers* m = m_latencyMarkersStorage.getMarkers(frameId);
 
       if (queryPool == nullptr) {
@@ -171,11 +174,11 @@ namespace dxvk {
         frameId, m_gpuFinishedState[index].load().numGpuSubmits );
     }
 
-    VkQueryPool* allocSubmitQueryPool()
-    { return m_calibratedDeviceTimestamps.isEnabled() ? m_queryPools.alloc() : nullptr; }
+    QueryPool* allocSubmitQueryPool()
+      { return m_calibratedDeviceTimestamps.isEnabled() ? m_queryPools.alloc() : nullptr; }
 
-    void freeSubmitQueryPool( VkQueryPool* queryPool )
-    { m_queryPools.free( queryPool ); }
+    void freeSubmitQueryPool( QueryPool* queryPool )
+      { m_queryPools.free( queryPool ); }
 
     FramePacerMode::Mode getMode() const {
       return m_mode->m_mode;
@@ -196,7 +199,7 @@ namespace dxvk {
     //
 
 
-    VkResult getSubmitQueryPoolResult( VkQueryPool* queryPool, uint64_t* timestamp ) { return VK_ERROR_UNKNOWN; }
+    VkResult getSubmitQueryPoolResult( QueryPool* queryPool, uint64_t* timestamp );
 
     int32_t getLatencyAverage() const
     { return m_latencyAverage.getAverage(); }
@@ -343,8 +346,9 @@ namespace dxvk {
     LatencyAverage m_latencyAverage;
     JitterStats m_jitterStats;
 
+    VkCommandPool m_commandPool;
     CalibratedDeviceTimestamps m_calibratedDeviceTimestamps;
-    sync::RingbufferAllocator<VkQueryPool, 256> m_queryPools;
+    sync::RingbufferAllocator<QueryPool, 256> m_queryPools;
 
   };
 

@@ -10956,6 +10956,29 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
     vkd3d_scratch_pool_init(device);
 
     memset(&pacer_device, 0, sizeof(struct PacerDevice));
+    pacer_device.device = device->vk_device;
+    if (device->queue_families[VKD3D_QUEUE_FAMILY_GRAPHICS])
+    {
+        pacer_device.graphicsQueueFamilyIndex = device->queue_families[VKD3D_QUEUE_FAMILY_GRAPHICS]->vk_family_index;
+        pacer_device.timestampValidBits = device->queue_families[VKD3D_QUEUE_FAMILY_GRAPHICS]->timestamp_bits;
+        pacer_device.timestampPeriod = device->device_info.properties2.properties.limits.timestampPeriod;
+        pacer_device.khrCalibratedTimestamps = device->vk_info.KHR_calibrated_timestamps;
+        pacer_device.vkCreateQueryPool = device->vk_procs.vkCreateQueryPool;
+        pacer_device.vkGetQueryPoolResults = device->vk_procs.vkGetQueryPoolResults;
+        pacer_device.vkCreateCommandPool = device->vk_procs.vkCreateCommandPool;
+        pacer_device.vkAllocateCommandBuffers = device->vk_procs.vkAllocateCommandBuffers;
+        pacer_device.vkBeginCommandBuffer = device->vk_procs.vkBeginCommandBuffer;
+        pacer_device.vkCmdResetQueryPool = device->vk_procs.vkCmdResetQueryPool;
+        pacer_device.vkCmdWriteTimestamp2 = device->vk_procs.vkCmdWriteTimestamp2;
+        pacer_device.vkEndCommandBuffer = device->vk_procs.vkEndCommandBuffer;
+        pacer_device.vkGetCalibratedTimestampsKHR = device->vk_procs.vkGetCalibratedTimestampsKHR;
+        pacer_device.vkGetPhysicalDeviceCalibrateableTimeDomainsKHR
+            = device->vk_procs.vkGetPhysicalDeviceCalibrateableTimeDomainsKHR;
+    }
+    else
+    {
+        ERR( "Cannot find graphics queue familiy properties during d3d12_device_init \n" );
+    }
 
     device->pacer = pacer_create(&pacer_device);
 

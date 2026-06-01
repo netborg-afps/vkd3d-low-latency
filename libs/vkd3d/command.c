@@ -932,7 +932,7 @@ static void *vkd3d_fence_worker_main(void *arg)
                 pacer_notify_gpu_execution_end(
                     worker->device->pacer,
                     cur_fences[i].fence_info.pacer_frame_id,
-                    NULL);
+                    cur_fences[i].fence_info.pacer_query_pool);
         }
 
         if (do_exit)
@@ -24351,6 +24351,16 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
     VkResult vr;
     HRESULT hr;
 
+    struct PacerQueryPool* query_pool;
+    bool extended_cmds_use_heap;
+    VkCommandBufferSubmitInfo* extended_cmds;
+    VkCommandBufferSubmitInfo extended_cmds_stack[64];
+
+    extended_cmds_use_heap = false;
+    query_pool = NULL;
+    extended_cmds = extended_cmds_stack;
+
+
     TRACE("queue %p, command_list_count %u, command_lists %p.\n",
           command_queue, exec->cmd_count, exec->cmd);
 
@@ -24520,6 +24530,24 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
         cmd_index += cmd_count;
         is_last = cmd_index == exec->cmd_count;
 
+        if (is_last && exec->pacer_frame_id
+            && (query_pool = pacer_alloc_submit_query_pool(command_queue->device->pacer)))
+        {
+            if (cmd_count+1 > 64) {
+                extended_cmds_use_heap = true;
+                extended_cmds = vkd3d_malloc((cmd_count+1) * sizeof(VkCommandBufferSubmitInfo));
+            }
+            memcpy(extended_cmds, submit->pCommandBufferInfos, sizeof(VkCommandBufferSubmitInfo) * cmd_count);
+
+            extended_cmds[cmd_count].sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+            extended_cmds[cmd_count].pNext = NULL;
+            extended_cmds[cmd_count].commandBuffer = query_pool->buffer;
+            extended_cmds[cmd_count].deviceMask = (cmd_count > 0) ? exec->cmd[cmd_index-1].deviceMask : 0;
+
+            submit->commandBufferInfoCount = cmd_count+1;
+            submit->pCommandBufferInfos = extended_cmds;
+        }
+
         if (command_queue->device->vk_info.NV_low_latency2)
         {
             spinlock_acquire(&command_queue->device->low_latency_swapchain_spinlock);
@@ -24640,6 +24668,9 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
 #endif
 
     vkd3d_queue_release(vkd3d_queue);
+    if (query_pool && extended_cmds_use_heap) {
+        vkd3d_free(extended_cmds);
+    }
 
     /* After a proper submit we have to queue up some work which is tied to this submission:
      * - After the submit completes, we know it's safe to release private reference on any queue waits.
@@ -24654,8 +24685,7 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
         fence_info.vk_semaphore = vkd3d_queue->submission_timeline;
         fence_info.vk_semaphore_value = signal_semaphore_infos[0].value;
         fence_info.pacer_frame_id = exec->pacer_frame_id;
-
-        // INFO( "set fence_info pacer_frame_id = %" PRIu64 "\n", fence_info.pacer_frame_id);
+        fence_info.pacer_query_pool = query_pool;
 
         submission_info = vkd3d_waiting_fence_set_callback(&fence_info,
                 &vkd3d_waiting_fence_release_submission, sizeof(*submission_info));

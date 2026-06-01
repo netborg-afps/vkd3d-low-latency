@@ -12,7 +12,7 @@ namespace dxvk {
 
 
   FramePacer::FramePacer( PacerDevice* device, uint64_t firstFrameId )
-  : m_latencyMarkersStorage(firstFrameId), m_device(*device), m_calibratedDeviceTimestamps(nullptr) {
+  : m_latencyMarkersStorage(firstFrameId), m_device(*device), m_calibratedDeviceTimestamps(device) {
     // We'll default to LOW_LATENCY, which generally provides the best "input lag"
     // along with time consistency and often appears the smoothest too.
     // MAX_FRAME_LATENCY can have advantages in some games like God of War that provide inconsistent
@@ -98,26 +98,67 @@ namespace dxvk {
     m_frameSync.signalFrameFinished  ( firstFrameId-1 );
     m_frameSync.signalCsFinished     ( firstFrameId );
 
-    //    if (m_calibratedDeviceTimestamps.isEnabled()) {
-    //      VkQueryPoolCreateInfo queryPoolInfo = {};
-    //      queryPoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-    //      queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-    //      queryPoolInfo.queryCount = 1;
-    //
-    //      VkQueryPool* queryPools = m_queryPools.getDataUnsafe();
-    //      for (int i=0; i<256; ++i) {
-    //        VkResult res = device->vkd()->vkCreateQueryPool(device->handle(), &queryPoolInfo, nullptr, &queryPools[i]);
-    //
-    //        if (res != VK_SUCCESS)
-    ////          throw DxvkError("FramePacer: Failed to create submit query pool");
-    //      }
-    //    }
+    if (m_calibratedDeviceTimestamps.isEnabled()) {
+      VkQueryPoolCreateInfo queryPoolInfo = {};
+      queryPoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+      queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+      queryPoolInfo.queryCount = 1;
+
+      QueryPool* queryPools = m_queryPools.getDataUnsafe();
+      for (int i=0; i<256; ++i) {
+        VkResult res = device->vkCreateQueryPool(device->device, &queryPoolInfo, nullptr, &queryPools[i].pool);
+
+        if (res != VK_SUCCESS) {
+          ERR("FramePacer: Failed to create submit query pool \n");
+          exit(-1);
+        }
+      }
+
+      VkCommandPoolCreateInfo commandPoolInfo = {};
+      commandPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+      commandPoolInfo.queueFamilyIndex = device->graphicsQueueFamilyIndex;
+
+      if (device->vkCreateCommandPool(device->device, &commandPoolInfo, nullptr, &m_commandPool) != VK_SUCCESS) {
+          ERR("FramePacer: Failed to create command pool \n");
+          exit(-1);
+      }
+
+      VkCommandBufferAllocateInfo allocInfo = {};
+      allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+      allocInfo.commandPool = m_commandPool;
+      allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+      allocInfo.commandBufferCount = 1;
+
+      VkCommandBufferBeginInfo beginInfo = {};
+      beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+      beginInfo.flags = 0;
+
+      for (int i=0; i<256; ++i) {
+        VkResult res = device->vkAllocateCommandBuffers(
+          device->device, &allocInfo, &queryPools[i].buffer);
+
+        if (res != VK_SUCCESS) {
+          ERR("FramePacer: Failed to create submit query pool \n");
+          exit(-1);
+        }
+
+        device->vkBeginCommandBuffer(queryPools[i].buffer, &beginInfo);
+        device->vkCmdResetQueryPool(queryPools[i].buffer, queryPools[i].pool, 0, 1);
+        device->vkCmdWriteTimestamp2(queryPools[i].buffer,
+          VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+          queryPools[i].pool, 0);
+        device->vkEndCommandBuffer(queryPools[i].buffer);
+      }
+    }
+
   }
 
 
   FramePacer::~FramePacer() {
     delete m_presentationStats.load();
     delete m_gpuBufferStats.load();
+
+    // todo: destroy all Vulkan objects
 
     //    if (m_calibratedDeviceTimestamps.isEnabled()) {
     //      for (int i=0; i<256; ++i) {
@@ -128,17 +169,17 @@ namespace dxvk {
   }
 
 
-  //  VkResult FramePacer::getSubmitQueryPoolResult( VkQueryPool* queryPool, uint64_t* timestamp ) {
-  //    VkQueryResultFlags flags = VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT;
-  //    VkResult res = m_device->vkd()->vkGetQueryPoolResults(
-  //      m_device->handle(), *queryPool, 0, 1, sizeof(uint64_t),
-  //      timestamp, sizeof(uint64_t), flags
-  //    );
-  //
-  ////    if (unlikely(res != VK_SUCCESS))
-  ////      Logger::err( str::format( "FramePacer: vkGetQueryPoolResults returned ", res) );
-  //
-  //    return res;
-  //  }
+  VkResult FramePacer::getSubmitQueryPoolResult( QueryPool* queryPool, uint64_t* timestamp ) {
+    VkQueryResultFlags flags = VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT;
+    VkResult res = m_device.vkGetQueryPoolResults(
+      m_device.device, queryPool->pool, 0, 1, sizeof(uint64_t),
+      timestamp, sizeof(uint64_t), flags
+    );
+
+    if (unlikely(res != VK_SUCCESS))
+      ERR( "FramePacer: vkGetQueryPoolResults returned %u \n", res);
+
+    return res;
+  }
 
 }

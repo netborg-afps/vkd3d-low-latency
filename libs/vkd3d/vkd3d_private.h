@@ -271,6 +271,7 @@ struct vkd3d_fence_wait_info
     VkSemaphore vk_semaphore;
     uint64_t vk_semaphore_value;
     pacer_frame_id_t pacer_frame_id;
+    struct PacerQueryPool* pacer_query_pool;
     vkd3d_waiting_fence_callback release_callback;
     unsigned char userdata[32];
 };
