@@ -154,7 +154,6 @@ if not vkd3d_is_msvc
 endif
 
 if vkd3d_platform == 'windows'
-  add_global_link_arguments('-lsynchronization', language : [ 'cpp' ])
   if vkd3d_compiler.has_link_argument('-static')
     add_global_link_arguments('-static', language : [ 'c', 'cpp' ])
   endif

@@ -121,6 +121,7 @@ struct dxgi_vk_swap_chain_present_request
     DXGI_COLOR_SPACE_TYPE dxgi_color_space_type;
     DXGI_VK_HDR_METADATA dxgi_hdr_metadata;
     uint32_t swap_interval;
+    pacer_frame_id_t pacer_frame_id;
     uint64_t low_latency_frame_id;
     union
     {
@@ -135,7 +136,7 @@ struct present_wait_entry
 {
     uint64_t id;
     uint64_t present_count;
-    uint64_t low_latency_id;
+    uint64_t pacer_frame_id;
     uint64_t begin_frame_time_ns;
     bool present_timing_enabled;
 };
@@ -171,7 +172,6 @@ struct dxgi_vk_swap_chain
     bool outstanding_present_request;
     uint32_t frame_latency_event_internal_wait_counts;
 
-    PacerHandle* pacer;
     UINT frame_latency;
     UINT frame_latency_internal;
     VkSurfaceKHR vk_surface;
@@ -513,7 +513,7 @@ static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
 }
 
 static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *chain,
-        uint64_t present_count, uint64_t present_id, uint64_t low_latency_id, uint64_t begin_frame_time_ns, bool present_timing_enabled)
+        uint64_t present_count, uint64_t present_id, uint64_t pacer_frame_id, uint64_t begin_frame_time_ns, bool present_timing_enabled)
 {
     struct present_wait_entry *entry;
     pthread_mutex_lock(&chain->wait_thread.lock);
@@ -522,10 +522,10 @@ static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *chain,
     entry = &chain->wait_thread.wait_queue[chain->wait_thread.wait_queue_count++];
     entry->id = present_id;
     entry->present_count = present_count;
-    entry->low_latency_id = low_latency_id;
+    entry->pacer_frame_id = pacer_frame_id;
     entry->begin_frame_time_ns = begin_frame_time_ns;
     entry->present_timing_enabled = present_timing_enabled;
-    // INFO("push low_latency_id %" PRIu64 ".\n", low_latency_id);
+    // INFO("push pacer_frame_id %" PRIu64 " to present-wait.\n", pacer_frame_id);
     pthread_cond_signal(&chain->wait_thread.cond);
     pthread_mutex_unlock(&chain->wait_thread.lock);
 }
@@ -1141,14 +1141,11 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain2 *i
 
     assert(chain->user.index < chain->desc.BufferCount);
 
-    if (!chain->pacer) {
-        chain->pacer = pacer_create();
-    }
-
     /* The present iteration on present thread has a similar counter and it will pick up the request from the ring. */
     chain->user.present_count += 1;
     request = &chain->request_ring[chain->user.present_count % ARRAY_SIZE(chain->request_ring)];
 
+    request->pacer_frame_id = pacer_notify_present(chain->queue->device->pacer);
     request->swap_interval = SyncInterval;
     request->dxgi_format = chain->user.backbuffers[chain->user.index]->desc.Format;
     request->user_index = chain->user.index;
@@ -1685,12 +1682,6 @@ static void dxgi_vk_swap_chain_destroy_swapchain_in_present_task(struct dxgi_vk_
     if (!chain->present.vk_swapchain)
         return;
 
-    // if (chain->pacer) {
-    //     // todo: care about destroying it, but not sure how we can guarantee if it not in use
-    //     // pacer_destroy(chain->pacer);
-    //     chain->pacer = NULL;
-    // }
-
     /* If we are going to destroy the swapchain and the device supports VK_NV_low_latency2
      * take the low latency lock. This ensures none of the other NV low latency functions
      * will attempt to use the stale swapchain handle. */
@@ -1924,48 +1915,48 @@ static bool dxgi_vk_swap_chain_find_compatible_unlocked_present_mode(
 
 static void dxgi_vk_swap_chain_set_low_latency_state(struct dxgi_vk_swap_chain *chain, struct low_latency_state *low_latency_state)
 {
-    /* It is possible that the Vulkan swapchain does not exist when the application sets
-     * the low latency state. If that is the case, just update the present latency state
-     * and it will be set during dxgi_vk_swap_chain_recreate_swapchain_in_present_task. */
-    if (chain->present.vk_swapchain)
-    {
-        const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
-        VkLatencySleepModeInfoNV latency_sleep_mode_info;
-
-        memset(&latency_sleep_mode_info, 0, sizeof(latency_sleep_mode_info));
-        latency_sleep_mode_info.sType = VK_STRUCTURE_TYPE_LATENCY_SLEEP_MODE_INFO_NV;
-        latency_sleep_mode_info.pNext = NULL;
-
-        latency_sleep_mode_info.lowLatencyMode = low_latency_state->mode;
-        latency_sleep_mode_info.lowLatencyBoost = low_latency_state->boost;
-        latency_sleep_mode_info.minimumIntervalUs = low_latency_state->minimum_interval_us;
-
-        VK_CALL(vkSetLatencySleepModeNV(chain->queue->device->vk_device, chain->present.vk_swapchain, &latency_sleep_mode_info));
-    }
-
-    chain->present.low_latency_state = *low_latency_state;
+    // /* It is possible that the Vulkan swapchain does not exist when the application sets
+    //  * the low latency state. If that is the case, just update the present latency state
+    //  * and it will be set during dxgi_vk_swap_chain_recreate_swapchain_in_present_task. */
+    // if (chain->present.vk_swapchain)
+    // {
+    //     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
+    //     VkLatencySleepModeInfoNV latency_sleep_mode_info;
+    //
+    //     memset(&latency_sleep_mode_info, 0, sizeof(latency_sleep_mode_info));
+    //     latency_sleep_mode_info.sType = VK_STRUCTURE_TYPE_LATENCY_SLEEP_MODE_INFO_NV;
+    //     latency_sleep_mode_info.pNext = NULL;
+    //
+    //     latency_sleep_mode_info.lowLatencyMode = low_latency_state->mode;
+    //     latency_sleep_mode_info.lowLatencyBoost = low_latency_state->boost;
+    //     latency_sleep_mode_info.minimumIntervalUs = low_latency_state->minimum_interval_us;
+    //
+    //     VK_CALL(vkSetLatencySleepModeNV(chain->queue->device->vk_device, chain->present.vk_swapchain, &latency_sleep_mode_info));
+    // }
+    //
+    // chain->present.low_latency_state = *low_latency_state;
 }
 
 static void dxgi_vk_swap_chain_low_latency_state_update(struct dxgi_vk_swap_chain *chain)
 {
-    if (chain->request.low_latency_update_requested)
-    {
-        if (chain->present.low_latency_state.mode != chain->request.requested_low_latency_state.mode ||
-                chain->present.low_latency_state.boost != chain->request.requested_low_latency_state.boost ||
-                chain->present.low_latency_state.minimum_interval_us != chain->request.requested_low_latency_state.minimum_interval_us)
-        {
-            dxgi_vk_swap_chain_set_low_latency_state(chain, &chain->request.requested_low_latency_state);
-        }
-    }
-
-    if (chain->debug_latency)
-    {
-        INFO("chain: %p, low latency mode: %s%s (%u us).\n",
-                (void *)chain,
-                chain->present.low_latency_state.mode ? "ON" : "OFF",
-                chain->present.low_latency_state.boost ? " (+ boost)" : "",
-                chain->present.low_latency_state.minimum_interval_us);
-    }
+    // if (chain->request.low_latency_update_requested)
+    // {
+    //     if (chain->present.low_latency_state.mode != chain->request.requested_low_latency_state.mode ||
+    //             chain->present.low_latency_state.boost != chain->request.requested_low_latency_state.boost ||
+    //             chain->present.low_latency_state.minimum_interval_us != chain->request.requested_low_latency_state.minimum_interval_us)
+    //     {
+    //         dxgi_vk_swap_chain_set_low_latency_state(chain, &chain->request.requested_low_latency_state);
+    //     }
+    // }
+    //
+    // if (chain->debug_latency)
+    // {
+    //     INFO("chain: %p, low latency mode: %s%s (%u us).\n",
+    //             (void *)chain,
+    //             chain->present.low_latency_state.mode ? "ON" : "OFF",
+    //             chain->present.low_latency_state.boost ? " (+ boost)" : "",
+    //             chain->present.low_latency_state.minimum_interval_us);
+    // }
 }
 
 static void dxgi_vk_swap_chain_anti_lag_state_update(struct dxgi_vk_swap_chain *chain)
@@ -3056,24 +3047,21 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
     if (vr < 0)
         dxgi_vk_swap_chain_destroy_swapchain_in_present_task(chain);
 
-    if (vr == VK_ERROR_OUT_OF_DATE_KHR)
-    {
+    if (vr == VK_ERROR_OUT_OF_DATE_KHR) {
         if (retry_counter < 3)
             dxgi_vk_swap_chain_present_iteration(chain, present_count, retry_counter + 1);
         else
-            if (chain->pacer) {
-                INFO( "VK_ERROR_OUT_OF_DATE_KHR in acquire" );
-                pacer_end_frame(chain->pacer, chain->request.low_latency_frame_id);
-            }
+        {
+            INFO( "VK_ERROR_OUT_OF_DATE_KHR in acquire" );
+            pacer_notify_gpu_present_end(chain->queue->device->pacer, chain->request.pacer_frame_id);
+        }
     }
     else if (vr == VK_ERROR_SURFACE_LOST_KHR)
     {
         /* If the surface is lost, we cannot expect to get forward progress. Just keep rendering to nothing. */
         chain->present.is_surface_lost = true;
-        if (chain->pacer) {
-            INFO( "VK_ERROR_SURFACE_LOST_KHR in acquire" );
-            pacer_end_frame(chain->pacer, chain->request.low_latency_frame_id);
-        }
+        INFO( "VK_ERROR_SURFACE_LOST_KHR in acquire" );
+        pacer_notify_gpu_present_end(chain->queue->device->pacer, chain->request.pacer_frame_id);
     }
 
     if (vr < 0)
@@ -3219,19 +3207,17 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
         if (retry_counter < 3)
             dxgi_vk_swap_chain_present_iteration(chain, present_count, retry_counter + 1);
         else
-            if (chain->pacer) {
-                INFO( "VK_ERROR_OUT_OF_DATE_KHR in present" );
-                pacer_end_frame(chain->pacer, chain->request.low_latency_frame_id);
-            }
+        {
+            INFO( "VK_ERROR_OUT_OF_DATE_KHR in present" );
+            pacer_notify_gpu_present_end(chain->queue->device->pacer, chain->request.pacer_frame_id);
+        }
     }
     else if (vr == VK_ERROR_SURFACE_LOST_KHR)
     {
         /* If the surface is lost, we cannot expect to get forward progress. Just keep rendering to nothing. */
         chain->present.is_surface_lost = true;
-        if (chain->pacer) {
-            INFO( "VK_ERROR_SURFACE_LOST_KHR in present" );
-            pacer_end_frame(chain->pacer, chain->request.low_latency_frame_id);
-        }
+        INFO( "VK_ERROR_SURFACE_LOST_KHR in present" );
+        pacer_notify_gpu_present_end(chain->queue->device->pacer, chain->request.pacer_frame_id);
     }
 }
 
@@ -3296,6 +3282,8 @@ static void dxgi_vk_swap_chain_present_callback(void *chain_)
     /* If no QueuePresentKHRs successfully commits a present ID, we'll fallback to a normal queue signal. */
     chain->present.present_id_valid = false;
     chain->present.present_target_enabled = false;
+
+    pacer_notify_queue_present(chain->queue->device->pacer, chain->request.pacer_frame_id);
 
     /* A present iteration may or may not render to backbuffer. We'll apply best effort here.
      * Forward progress must be ensured, so if we cannot get anything on-screen in a reasonable amount of retries, ignore it. */
@@ -3708,10 +3696,8 @@ static void *dxgi_vk_swap_chain_wait_worker(void *chain_)
         pthread_mutex_unlock(&chain->wait_thread.lock);
 
         /* Sentinel for swapchain teardown. */
-        if (!entry.present_count) {
-            INFO( "vkd3d-swapchain-sync TEARDOWN\n" );
+        if (!entry.present_count)
             break;
-        }
 
         if (entry.id)
         {
@@ -3737,14 +3723,12 @@ static void *dxgi_vk_swap_chain_wait_worker(void *chain_)
                 }
             }
 
-            pacer_end_frame(chain->pacer, entry.low_latency_id);
-
+            pacer_notify_gpu_present_end(chain->queue->device->pacer, chain->request.pacer_frame_id);
             vkd3d_queue_timeline_trace_complete_present_wait(timeline_trace, cookie);
         }
         else
         {
-            pacer_end_frame(chain->pacer, entry.low_latency_id);
-
+            pacer_notify_gpu_present_end(chain->queue->device->pacer, chain->request.pacer_frame_id);
             dxgi_vk_swap_chain_drain_complete_semaphore(chain, entry.present_count);
         }
 
@@ -4074,10 +4058,10 @@ bool dxgi_vk_swap_chain_low_latency_enabled(struct dxgi_vk_swap_chain *chain)
 
 void dxgi_vk_swap_chain_latency_sleep(struct dxgi_vk_swap_chain *chain)
 {
-    if (chain->present.vk_swapchain)
-    {
-        NvAPI_sleep(chain->pacer);
-    }
+    // if (chain->present.vk_swapchain)
+    // {
+    //     NvAPI_sleep(chain->queue->device->pacer);
+    // }
 
     // const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
     // struct vkd3d_queue_timeline_trace_cookie cookie;
@@ -4125,24 +4109,24 @@ void dxgi_vk_swap_chain_latency_sleep(struct dxgi_vk_swap_chain *chain)
 void dxgi_vk_swap_chain_set_latency_sleep_mode(struct dxgi_vk_swap_chain *chain, bool low_latency_mode,
 	bool low_latency_boost, uint32_t minimum_interval_us)
 {
-    pthread_mutex_lock(&chain->present.low_latency_state_update_lock);
-
-    chain->requested_low_latency_state.mode = low_latency_mode;
-    chain->requested_low_latency_state.boost = low_latency_boost;
-    chain->requested_low_latency_state.minimum_interval_us = minimum_interval_us;
-
-    /* The actual call to vkSetLatencySleepModeNV will happen
-     * when the application calls Present and the requested low
-     * latency state is passed to the present task. */
-    chain->low_latency_update_requested = true;
-
-    pthread_mutex_unlock(&chain->present.low_latency_state_update_lock);
+    // pthread_mutex_lock(&chain->present.low_latency_state_update_lock);
+    //
+    // chain->requested_low_latency_state.mode = low_latency_mode;
+    // chain->requested_low_latency_state.boost = low_latency_boost;
+    // chain->requested_low_latency_state.minimum_interval_us = minimum_interval_us;
+    //
+    // /* The actual call to vkSetLatencySleepModeNV will happen
+    //  * when the application calls Present and the requested low
+    //  * latency state is passed to the present task. */
+    // chain->low_latency_update_requested = true;
+    //
+    // pthread_mutex_unlock(&chain->present.low_latency_state_update_lock);
 }
 
 void dxgi_vk_swap_chain_set_latency_marker(struct dxgi_vk_swap_chain *chain,
         uint64_t frameID, VkLatencyMarkerNV marker, bool from_app)
 {
-    NvAPI_setLatencyMarker(chain->pacer, frameID, marker );
+    // NvAPI_setLatencyMarker( chain->queue->device->pacer, frameID, marker );
     // INFO("dxgi_vk_swap_chain_set_latency_marker %" PRIu64 ", %" PRIu32 "\n", frameID, (uint32_t)marker);
 
     // const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;

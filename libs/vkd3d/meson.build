@@ -114,6 +114,7 @@ endif
 
 if vkd3d_platform == 'windows'
   vkd3d_src += ['shared_metadata.c']
+  vkd3d_extra_libs += meson.get_compiler('cpp').find_library('synchronization', required : true)
 endif
 
 if enable_profiling

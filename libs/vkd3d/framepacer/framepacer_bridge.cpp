@@ -3,52 +3,55 @@
 #include "nvapi_pacing_adapter.h"
 #include "util/util_log.h"
 
-#define NV_PACER(x) (((Handle*) x)->nv_api_pacer)
+#define PACER(x) ((NvApi_PacingAdapter*) x)
+static std::atomic<bool> NvApi_sleepEnabled;
 
-struct Handle {
-    NvApi_PacingAdapter nv_api_pacer;
-};
-
-void NvAPI_setLatencyMarker( PacerHandle* handle, uint64_t frameID, VkLatencyMarkerNV marker ) {
-    if (handle) NV_PACER(handle).setLatencyMarker( frameID, marker );
+PacerHandle pacer_create( struct PacerDevice* device ) {
+    INFO( "pacer_create start \n" );
+    PacerHandle res = new NvApi_PacingAdapter( nullptr );
+    INFO( "pacer_create done \n" );
+    return res;
 }
 
-void NvAPI_sleep( PacerHandle* handle ) {
-    if (handle) NV_PACER(handle).sleepAndBeginFrame();
+void pacer_destroy(PacerHandle handle) {
+    INFO( "pacer_destroy start \n" );
+    delete PACER(handle);
+    INFO( "pacer_destroy done \n" );
 }
 
-void pacer_end_frame( PacerHandle* handle, uint64_t nvId ) {
-    if (handle) NV_PACER(handle).endFrame( nvId );
+void NvAPI_setSleepMode( bool enable ) {
+    NvApi_sleepEnabled.store( enable );
 }
 
-PacerHandle* pacer_create() {
-    Handle* handle = new Handle();
-    INFO("Create Pacer %" PRIu64 "\n", (uintptr_t) &NV_PACER(handle));
-    return (PacerHandle*) handle;
+void NvAPI_setLatencyMarker( PacerHandle handle, uint64_t frameID, VkLatencyMarkerNV marker ) {
+    PACER(handle)->setLatencyMarker( frameID, marker );
 }
 
-void pacer_destroy( PacerHandle* handle ) {
-    // todo
+void NvAPI_sleep( PacerHandle handle ) {
+    if (NvApi_sleepEnabled)
+        PACER(handle)->sleepAndBeginFrame();
 }
 
-// void pacer_start_frame( PacerHandle* handle, uint64_t frameId ) {
-//     INFO("pacer_start_frame %" PRIu64".\n", frameId);
-//     pacer(handle)->sleepAndBeginFrame( frameId );
-//     INFO("pacer_start_frame STARTED %" PRIu64".\n", frameId);
-// }
-//
-// void pacer_notify_present( PacerHandle* handle, uint64_t frameId ) {
-//     pacer(handle)->notifyPresent( frameId );
-// }
-//
-// void pacer_notify_queue_present( PacerHandle* handle, uint64_t frameId ) {
-//     pacer(handle)->notifyQueuePresentBegin( frameId );
-// }
-//
-//
-// void pacer_notify_gpu_execution_end( PacerHandle* handle, uint64_t frameId ) {
-//     INFO("pacer_notify_gpu_execution_end %" PRIu64".\n", frameId);
-//     pacer(handle)->notifyGpuExecutionEnd( frameId, nullptr );
-// }
+pacer_frame_id_t pacer_notify_submit( PacerHandle handle ) {
+    return PACER(handle)->notifySubmit();
+}
 
+pacer_frame_id_t pacer_notify_present( PacerHandle handle ) {
+    return PACER(handle)->notifyPresent();
+}
 
+void pacer_notify_queue_submit( PacerHandle handle, pacer_frame_id_t pacerId ) {
+    PACER(handle)->notifyQueueSubmit( pacerId );
+}
+
+void pacer_notify_queue_present( PacerHandle handle, pacer_frame_id_t pacerId ) {
+    PACER(handle)->notifyQueuePresent( pacerId );
+}
+
+void pacer_notify_gpu_execution_end( PacerHandle handle, pacer_frame_id_t frameId, struct PacerQueryPool* queryPool ) {
+    PACER(handle)->notifyGpuExecutionEnd( frameId, queryPool );
+}
+
+void pacer_notify_gpu_present_end( PacerHandle handle, pacer_frame_id_t frameId ) {
+    // do nothing for now
+}

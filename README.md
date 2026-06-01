@@ -4,7 +4,7 @@ Enhances [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) with 
 
 ## Status
 
-It is in a very early state, moving over the frame pacing of [dxvk-low-latency](https://github.com/netborg-afps/dxvk-low-latency) step by step. Expect bugs as I'm getting familiar with the VKD3D codebase and the dx12 environment.
+It is in a early state, moving over the frame pacing of [dxvk-low-latency](https://github.com/netborg-afps/dxvk-low-latency) step by step. Expect bugs as I'm getting familiar with the VKD3D codebase and the dx12 environment.
 
 In dx12, there are basically three main ways to achieve proper mouse input and input lag reduction. We're starting by integrating the pacing into the NVIDIA Reflex API. AMD Anti-lag 2 and Waitable DXGI Swapchains will follow later. 
 

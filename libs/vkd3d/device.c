@@ -4715,6 +4715,7 @@ static void d3d12_device_destroy(struct d3d12_device *device)
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     size_t i, j;
 
+    pacer_destroy(device->pacer);
     d3d_destruction_notifier_free(&device->destruction_notifier);
 
     if (device->internal_sparse_queue)
@@ -10855,6 +10856,7 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
         struct vkd3d_instance *instance, const struct vkd3d_device_create_info *create_info)
 {
     const struct vkd3d_vk_device_procs *vk_procs;
+    struct PacerDevice pacer_device;
     HRESULT hr;
     int rc;
 
@@ -10952,6 +10954,10 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
         goto out_cleanup_queue_timeline_trace;
 
     vkd3d_scratch_pool_init(device);
+
+    memset(&pacer_device, 0, sizeof(struct PacerDevice));
+
+    device->pacer = pacer_create(&pacer_device);
 
 #ifdef VKD3D_ENABLE_BREADCRUMBS
     vkd3d_breadcrumb_tracer_init_barrier_hashes(&device->breadcrumb_tracer);

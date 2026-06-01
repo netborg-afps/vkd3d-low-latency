@@ -44,6 +44,7 @@
 #include "vkd3d_native_sync_handle.h"
 #include "config_flags.h"
 #include "copy_utils.h"
+#include "framepacer/framepacer_bridge.h"
 #include <assert.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -269,6 +270,7 @@ struct vkd3d_fence_wait_info
 {
     VkSemaphore vk_semaphore;
     uint64_t vk_semaphore_value;
+    pacer_frame_id_t pacer_frame_id;
     vkd3d_waiting_fence_callback release_callback;
     unsigned char userdata[32];
 };
@@ -3722,6 +3724,7 @@ struct d3d12_command_queue_submission_execute
     struct d3d12_command_allocator **command_allocators;
     UINT cmd_count;
     UINT num_command_allocators;
+    pacer_frame_id_t pacer_frame_id;
     uint64_t low_latency_frame_id;
 
     struct vkd3d_initial_transition *transitions;
@@ -5733,6 +5736,7 @@ struct d3d12_device
     pthread_mutex_t mutex;
     pthread_mutex_t global_submission_mutex;
     spinlock_t low_latency_swapchain_spinlock;
+    PacerHandle pacer;
 
     VkPhysicalDeviceMemoryProperties memory_properties;
 

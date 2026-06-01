@@ -7,6 +7,7 @@
 #include "util/util_time.h"
 #include "util/util_likely.h"
 
+class NvApi_PacingAdapter;
 
 namespace dxvk {
 
@@ -31,6 +32,9 @@ namespace dxvk {
     std::vector<time_point> gpuSubmit;
     std::vector<time_point> gpuQueueSubmit;
 
+    int32_t simulationFinished;
+    int32_t renderStart;
+
   };
 
 
@@ -48,7 +52,8 @@ namespace dxvk {
 
 
   class LatencyMarkersStorage {
-    friend class FramePacer;
+    friend class ::dxvk::FramePacer;
+    friend class ::NvApi_PacingAdapter;
   public:
 
     LatencyMarkersStorage( uint64_t firstFrameId )
@@ -68,6 +73,8 @@ namespace dxvk {
 
       LatencyMarkers* markers = getMarkers(frameId);
       markers->start = now;
+      markers->simulationFinished = 0;
+      markers->renderStart = 0;
     }
 
     void registerFrameEnd( uint64_t frameId ) {
@@ -102,7 +109,8 @@ namespace dxvk {
 
     // simple modulo hash mapping is used for frameIds. They are expected to monotonically increase by one.
     // only store a small number of past frames to keep the memory footprint low.
-    static constexpr uint16_t m_numMarkers = 4;
+    // but need to increase size again to get some amount of safety when Reflex is used
+    static constexpr uint16_t m_numMarkers = 256;
     const uint64_t m_firstFrameId;
     std::array<LatencyMarkers, m_numMarkers> m_markers = { };
     LatencyMarkersTimeline m_timeline;

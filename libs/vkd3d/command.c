@@ -926,7 +926,14 @@ static void *vkd3d_fence_worker_main(void *arg)
         pthread_mutex_unlock(&worker->mutex);
 
         for (i = 0; i < cur_fence_count; i++)
+        {
             vkd3d_wait_for_gpu_timeline_semaphore(worker, &cur_fences[i]);
+            if (cur_fences[i].fence_info.pacer_frame_id)
+                pacer_notify_gpu_execution_end(
+                    worker->device->pacer,
+                    cur_fences[i].fence_info.pacer_frame_id,
+                    NULL);
+        }
 
         if (do_exit)
             break;
@@ -23164,6 +23171,9 @@ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12Comm
     sub.execute.breadcrumb_indices_count = breadcrumb_indices ? command_list_count : 0;
 #endif
     sub.execute.timeline_cookie = timeline_cookie;
+    sub.execute.pacer_frame_id = (command_queue->desc.Type == D3D12_COMMAND_LIST_TYPE_DIRECT)
+        ? pacer_notify_submit(command_queue->device->pacer)
+        : 0;
     d3d12_command_queue_add_submission(command_queue, &sub);
 }
 
@@ -24643,6 +24653,9 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
         memset(&fence_info, 0, sizeof(fence_info));
         fence_info.vk_semaphore = vkd3d_queue->submission_timeline;
         fence_info.vk_semaphore_value = signal_semaphore_infos[0].value;
+        fence_info.pacer_frame_id = exec->pacer_frame_id;
+
+        // INFO( "set fence_info pacer_frame_id = %" PRIu64 "\n", fence_info.pacer_frame_id);
 
         submission_info = vkd3d_waiting_fence_set_callback(&fence_info,
                 &vkd3d_waiting_fence_release_submission, sizeof(*submission_info));
@@ -25272,6 +25285,7 @@ static void *d3d12_command_queue_submission_worker_main(void *userdata)
 
         case VKD3D_SUBMISSION_EXECUTE:
             VKD3D_REGION_BEGIN(queue_execute);
+            pacer_notify_queue_submit(queue->device->pacer, submission.execute.pacer_frame_id);
             cookie = vkd3d_queue_timeline_trace_register_generic_region(&queue->device->queue_timeline_trace, "EXECUTE");
 
             memset(&transition_cmd, 0, sizeof(transition_cmd));

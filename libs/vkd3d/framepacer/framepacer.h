@@ -1,5 +1,6 @@
 #pragma once
 
+#include "framepacer_bridge.h"
 #include <vulkan/vulkan_core.h>
 #include "framepacer_mode.h"
 #include "frame_sync.h"
@@ -8,6 +9,8 @@
 #include "jitter_stats.h"
 #include "calibrated_device_timestamps.h"
 #include "util/sync/sync_ringbuffer_allocator.h"
+#include "util/util_log.h"
+#include <cinttypes>
 
 
 /* \brief Frame pacer interface managing the CPU - GPU synchronization.
@@ -18,9 +21,9 @@
  * like smoothness and latency.
  */
 
-namespace dxvk {
+struct PacerDevice;
 
-  class DxvkDevice;
+namespace dxvk {
 
 
   class FramePacer {
@@ -28,7 +31,7 @@ namespace dxvk {
     using time_point   = high_resolution_clock::time_point;
   public:
 
-    FramePacer( DxvkDevice* device, uint64_t firstFrameId );
+    FramePacer( PacerDevice* device, uint64_t firstFrameId );
     ~FramePacer();
 
     void sleepAndBeginFrame( uint64_t frameId ) {
@@ -48,7 +51,6 @@ namespace dxvk {
       m_latencyMarkersStorage.registerFrameEnd(frameId);
       m_mode->endFrame(frameId);
       m_frameSync.signalFrameFinished(frameId);
-      m_gpuStarts[ (frameId-1) % m_gpuStarts.size() ].store(0);
       trackStats(frameId);
     }
 
@@ -68,10 +70,12 @@ namespace dxvk {
     void notifySubmit( uint64_t frameId ) {
       LatencyMarkers* m = m_latencyMarkersStorage.getMarkers(frameId);
       m->gpuSubmit.push_back(high_resolution_clock::now());
+      submitCheckGpuFinished(frameId);
     }
 
     void notifyPresent( uint64_t frameId ) {
       // dx to vk translation is finished
+      // in case of dx12 this is the dxgi.present
       if (frameId != 0) {
         auto now = high_resolution_clock::now();
         LatencyMarkers* m = m_latencyMarkersStorage.getMarkers(frameId);
@@ -79,6 +83,7 @@ namespace dxvk {
         m->cpuFinished = std::chrono::duration_cast<microseconds>(now - m->start).count();
         next->gpuSubmit.clear();
 
+        dxgiPresentCheckGpuFinished(frameId);
         m_latencyMarkersStorage.m_timeline.cpuFinished.store(frameId);
       }
     }
@@ -108,6 +113,7 @@ namespace dxvk {
         auto now = high_resolution_clock::now();
         m->gpuReady.push_back(now);
         m_mode->notifyGpuReady(frameId, now);
+        gpuExecutionCheckGpuFinished(frameId);
         return;
       }
 
@@ -119,6 +125,7 @@ namespace dxvk {
         m->gpuReady.push_back(now);
         m_mode->notifyGpuReady(frameId, now);
         m_queryPools.free(queryPool);
+        gpuExecutionCheckGpuFinished(frameId);
         return;
       }
 
@@ -130,28 +137,38 @@ namespace dxvk {
       m_mode->notifyGpuReady(frameId, t);
 
       m_queryPools.free(queryPool);
+      gpuExecutionCheckGpuFinished(frameId);
     }
 
-    void notifyGpuPresentBegin( uint64_t frameId ) {
+    void finishRender( uint64_t frameId ) {
       // we get frameId == 0 for repeated presents (SyncInterval)
-      if (frameId != 0) {
-        LatencyMarkers* m = m_latencyMarkersStorage.getMarkers(frameId);
-        LatencyMarkers* next = m_latencyMarkersStorage.getMarkers(frameId+1);
-        assert( !m->gpuReady.empty() );
-        auto t = m->gpuReady.back();
-        m->gpuFinished = std::chrono::duration_cast<microseconds>(t - m->start).count();
-        next->gpuReady.clear();
-        next->gpuReady.push_back(t);
-        m_mode->notifyGpuReady(frameId+1, t);
-        m_calibratedDeviceTimestamps.calibrate();
+      assert( frameId > 0 );
 
-        gpuExecutionCheckGpuStart(frameId+1, next, t);
+      LatencyMarkers* m = m_latencyMarkersStorage.getMarkers(frameId);
+      LatencyMarkers* next = m_latencyMarkersStorage.getMarkers(frameId+1);
+      assert( !m->gpuReady.empty() );
+      auto t = m->gpuReady.back();
+      m->gpuFinished = std::chrono::duration_cast<microseconds>(t - m->start).count();
+      next->gpuReady.clear();
+      next->gpuReady.push_back(t);
+      m_mode->notifyGpuReady(frameId+1, t);
+      m_calibratedDeviceTimestamps.calibrate();
 
-        m_latencyAverage.push(m->gpuFinished);
-        m_latencyMarkersStorage.m_timeline.gpuFinished.store(frameId);
-        m_mode->finishRender(frameId);
-        m_frameSync.signalRenderFinished(frameId);
-      }
+      gpuExecutionCheckGpuStart(frameId+1, next, t);
+
+      m_latencyAverage.push(m->gpuFinished);
+      m_latencyMarkersStorage.m_timeline.gpuFinished.store(frameId);
+      m_mode->finishRender(frameId);
+      m_frameSync.signalRenderFinished(frameId);
+
+      GpuFinishedState initState = {};
+      size_t initIndex = (frameId-1) % m_gpuFinishedState.size();
+      m_gpuFinishedState[initIndex].store(initState);
+      m_gpuStarts[ (frameId-1) % m_gpuStarts.size() ].store(0);
+
+      size_t index = frameId % m_gpuFinishedState.size();
+      INFO( "gpu finished frameId %" PRIu64 " has %" PRIu16 " submissions\n",
+        frameId, m_gpuFinishedState[index].load().numGpuSubmits );
     }
 
     VkQueryPool* allocSubmitQueryPool()
@@ -179,7 +196,7 @@ namespace dxvk {
     //
 
 
-    VkResult getSubmitQueryPoolResult( VkQueryPool* queryPool, uint64_t* timestamp );
+    VkResult getSubmitQueryPoolResult( VkQueryPool* queryPool, uint64_t* timestamp ) { return VK_ERROR_UNKNOWN; }
 
     int32_t getLatencyAverage() const
     { return m_latencyAverage.getAverage(); }
@@ -217,6 +234,45 @@ namespace dxvk {
       uint16_t val = gpuStart.fetch_or(gpuReadyBit);
       if (val == queueSubmitBit)
         signalGpuStart( frameId, m, t );
+    }
+
+    void submitCheckGpuFinished( uint64_t frameId ) {
+        uint32_t index = frameId % m_gpuFinishedState.size();
+        GpuFinishedState expected = m_gpuFinishedState[ index ].load();
+        GpuFinishedState desiredState;
+
+        do {
+            desiredState = expected;
+            desiredState.numSubmits++;
+        } while ( !m_gpuFinishedState[index].compare_exchange_weak( expected, desiredState ) );
+    }
+
+    void dxgiPresentCheckGpuFinished( uint64_t frameId ) {
+      uint32_t index = frameId % m_gpuFinishedState.size();
+      GpuFinishedState expected = m_gpuFinishedState[ index ].load();
+      GpuFinishedState desiredState;
+
+      do {
+        desiredState = expected;
+        desiredState.presentIssued = true;
+      } while ( !m_gpuFinishedState[ index ].compare_exchange_weak( expected, desiredState ) );
+
+      if (desiredState.numSubmits == desiredState.numGpuSubmits && desiredState.presentIssued)
+        finishRender(frameId);
+    }
+
+    void gpuExecutionCheckGpuFinished( uint64_t frameId ) {
+      uint32_t index = frameId % m_gpuFinishedState.size();
+      GpuFinishedState expected = m_gpuFinishedState[ index ].load();
+      GpuFinishedState desiredState;
+
+      do {
+        desiredState = expected;
+        desiredState.numGpuSubmits++;
+      } while ( !m_gpuFinishedState[ index ].compare_exchange_weak( expected, desiredState ) );
+
+      if (desiredState.numSubmits == desiredState.numGpuSubmits && desiredState.presentIssued)
+        finishRender(frameId);
     }
 
     void trackStats( uint64_t frameId ) {
@@ -266,10 +322,19 @@ namespace dxvk {
       }
     }
 
-    DxvkDevice* m_device;
+
+    struct alignas(8) GpuFinishedState {
+      uint16_t numSubmits    = { 0 };
+      uint16_t numGpuSubmits = { 0 };
+      bool presentIssued     = { false };
+      uint8_t __padding[3]   = { 0 };
+    };
+
+    PacerDevice m_device;
     std::unique_ptr<FramePacerMode> m_mode;
 
-    std::array< std::atomic< uint16_t >, 8 > m_gpuStarts = { };
+    std::array< std::atomic<GpuFinishedState>, 256 > m_gpuFinishedState = { };
+    std::array< std::atomic< uint16_t >, 256 > m_gpuStarts = { };
     static constexpr uint16_t queueSubmitBit = 1;
     static constexpr uint16_t gpuReadyBit    = 2;
 
