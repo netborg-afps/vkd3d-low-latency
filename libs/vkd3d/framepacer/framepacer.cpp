@@ -1,5 +1,5 @@
 #include "framepacer.h"
-//#include "dxvk_framepacer_mode_low_latency.h"
+#include "framepacer_mode_low_latency.h"
 #include "framepacer_mode_min_latency.h"
 #include <string>
 #include <stdint.h>
@@ -17,7 +17,7 @@ namespace dxvk {
     // along with time consistency and often appears the smoothest too.
     // MAX_FRAME_LATENCY can have advantages in some games like God of War that provide inconsistent
     // cpu frametimes. Also, it's tuned for highest fps which can be relevant in benchmarks.
-    FramePacerMode::Mode mode = FramePacerMode::MIN_LATENCY;
+    FramePacerMode::Mode mode = FramePacerMode::LOW_LATENCY;
     // int refreshRate = 0;
 
     // std::string configStr = "min-latency";
@@ -58,11 +58,11 @@ namespace dxvk {
         // break;
 
       case FramePacerMode::LOW_LATENCY:
-        ////        Logger::info( "Frame pace: low-latency" );
-        //        m_calibratedDeviceTimestamps.enable();
-        //        m_mode = std::make_unique<LowLatencyMode>(mode, &m_latencyMarkersStorage, &m_frameSync, options, firstFrameId);
-        //        break;
-        //
+        //        Logger::info( "Frame pace: low-latency" );
+        m_calibratedDeviceTimestamps.enable();
+        m_mode = std::make_unique<LowLatencyMode>(mode, &m_latencyMarkersStorage, &m_frameSync, firstFrameId);
+        break;
+
       case FramePacerMode::LOW_LATENCY_VRR:
         ////        Logger::info( "Frame pace: low-latency-vrr" );
         //        m_calibratedDeviceTimestamps.enable();

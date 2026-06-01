@@ -93,7 +93,8 @@ vkd3d_src = [
   'framepacer/framepacer_bridge.cpp',
   'framepacer/framepacer.cpp',
   'framepacer/calibrated_device_timestamps.cpp',
-  'framepacer/util/util_sleep.cpp'
+  'framepacer/util/util_sleep.cpp',
+  'framepacer/util/thread.cpp'
 ]
 
 if enable_renderdoc
