@@ -1,4 +1,19 @@
-# vkd3d-proton
+# vkd3d-low-latency
+
+Enhances [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) with low-latency frame pacing capabilities to improve game responsiveness and input lag. It also improves latency stability over time, usually resulting in a more accurate playback speed of the generated video.
+
+## Status
+
+In dx12, there are basically three main ways to achieve proper mouse input and input lag reduction. We're starting by integrating the pacing into the NVIDIA Reflex API. AMD Anti-lag 2 and Waitable DXGI Swapchains will follow.
+
+`VKD3D_FRAME_RATE` is integrated into the frame pacing logic.
+
+This pacing currently operates on 2 in-flight frames. In dx12, it appears that some games need 3 in-flight frames to max out the GPU - support for this will be added when I can make it work.
+
+It already works great in a lot of games, but may still have a bug here and there.
+
+
+# vkd3d-proton (Original Description)
 
 vkd3d-proton is a fork of VKD3D, which aims to implement the full Direct3D 12 API on top of Vulkan.
 The project serves as the development effort for Direct3D 12 support in [Proton](https://github.com/ValveSoftware/Proton).

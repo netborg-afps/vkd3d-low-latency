@@ -34,7 +34,7 @@ struct vkd3d_config_flags_bitfield
 	uint32_t reserved0 : 31;
 };
 
-STATIC_ASSERT(sizeof(struct vkd3d_config_flags_bitfield) == 12);
+STATIC_ASSERT(sizeof(struct vkd3d_config_flags_bitfield) == 16);
 
 union vkd3d_config_flags
 {
