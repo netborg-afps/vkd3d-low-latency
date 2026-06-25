@@ -839,8 +839,24 @@ static void vkd3d_wait_for_gpu_timeline_semaphore(struct vkd3d_fence_worker *wor
         {
             ERR("Failed to wait for Vulkan timeline semaphore, vr %d.\n", vr);
             VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(device, vr == VK_ERROR_DEVICE_LOST || vr == VK_TIMEOUT);
+            if (worker->queue->pacer_queues.vulkan_queue && fence->fence_info.pacer_vulkan_submit_id != 0) {
+                pacer_queue_notify_gpu_execution_end(
+                    worker->queue->pacer_queues,
+                    fence->fence_info.pacer_command_submit_id,
+                    fence->fence_info.pacer_vulkan_submit_id,
+                    fence->fence_info.pacer_query_pool);
+            }
+
             vkd3d_waiting_fence_complete_submissions(device, worker, fence, false);
             return;
+        }
+
+        if (worker->queue->pacer_queues.vulkan_queue && fence->fence_info.pacer_vulkan_submit_id != 0) {
+            pacer_queue_notify_gpu_execution_end(
+                worker->queue->pacer_queues,
+                fence->fence_info.pacer_command_submit_id,
+                fence->fence_info.pacer_vulkan_submit_id,
+                fence->fence_info.pacer_query_pool);
         }
 
         /* This is a good time to kick the debug threads into action. */
@@ -23164,6 +23180,10 @@ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12Comm
     sub.execute.breadcrumb_indices_count = breadcrumb_indices ? command_list_count : 0;
 #endif
     sub.execute.timeline_cookie = timeline_cookie;
+    if (command_queue->desc.Type == D3D12_COMMAND_LIST_TYPE_DIRECT || command_queue->desc.Type == D3D12_COMMAND_LIST_TYPE_COMPUTE)
+        sub.execute.pacer_command_submit_id = pacer_command_queue_notify_submit(command_queue->pacer_queues.command_queue);
+//     INFO( "submit to command queue %" PRIu64 " with type %" PRIu16 " \n", (uintptr_t) command_queue, command_queue->desc.Type );
+
     d3d12_command_queue_add_submission(command_queue, &sub);
 }
 
@@ -23876,7 +23896,7 @@ static void d3d12_command_queue_signal_shared(struct d3d12_command_queue *comman
     submit_info.signalSemaphoreInfoCount = 1;
     submit_info.pSignalSemaphoreInfos = &signal_semaphore_info;
 
-    vr = VK_CALL(vkQueueSubmit2(vk_queue, 1, &submit_info, VK_NULL_HANDLE));
+    vr = VK_CALL(vkQueueSubmit2(vk_queue, 1, &submit_info, VK_NULL_HANDLE)); // signals here seem to be related to cross-process sync
 
     if (vr == VK_SUCCESS)
     {
@@ -24311,8 +24331,103 @@ static bool d3d12_command_queue_needs_staggered_submissions_locked(struct d3d12_
     return true;
 }
 
+
+struct pacer_cmd_injection {
+    struct pacer_query_pool* query_pool_top_of_pipe;
+    struct pacer_query_pool* query_pool;
+    VkCommandBufferSubmitInfo* extended_cmds_heap;
+
+};
+
+
+static struct pacer_cmd_injection inject_pacer_timestamps( bool is_first, bool is_last, VkSubmitInfo2 *submit,
+    int cmd_count, VkCommandBufferSubmitInfo* extended_cmds, uint32_t device_mask,
+    struct pacer_queues pacer_queues, struct d3d12_command_queue_submission_execute *exec )
+{
+    // todo: a little inconsitent whether we check for vulkan_queue != NULL or not
+    int ext_cmds_size;
+    int copy_start;
+    struct pacer_cmd_injection res;
+    memset( &res, 0, sizeof(res) );
+
+    ext_cmds_size = cmd_count;
+    copy_start = 0;
+
+    if (is_first)
+    {
+        res.query_pool_top_of_pipe = pacer_vulkan_queue_alloc_query_pool_top_of_pipe(
+            pacer_queues.vulkan_queue);
+        assert( res.query_pool_top_of_pipe != NULL );
+        ext_cmds_size += 1;
+        copy_start = 1;
+
+        // notify vulkan submit
+        if (pacer_queues.vulkan_queue)
+        {
+            // we need to have a pointer from the application side submit to the hardware side
+            exec->pacer_vulkan_submit_id =
+                    pacer_vulkan_queue_notify_submit(
+                    pacer_queues.vulkan_queue
+                    );
+            pacer_command_queue_notify_vulkan_submit(
+                    pacer_queues.command_queue,
+                    exec->pacer_command_submit_id,
+                    exec->pacer_vulkan_submit_id);
+        }
+    }
+
+    if (is_last)
+    {
+        res.query_pool = pacer_vulkan_queue_alloc_query_pool(pacer_queues.vulkan_queue);
+        assert( res.query_pool != NULL );
+        ext_cmds_size += 1;
+    }
+
+    if (!is_first)
+    {
+        INFO( "staggered submit detected - implemented low-latency pacing support but cannot test (didn't find any game yet) \n" );
+    }
+
+    if (!is_first && !is_last)
+        return res;
+
+    if (ext_cmds_size > 64)
+    {
+        res.extended_cmds_heap = vkd3d_malloc( ext_cmds_size * sizeof(VkCommandBufferSubmitInfo));
+        extended_cmds = res.extended_cmds_heap;
+    }
+
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Warray-bounds"
+    #pragma GCC diagnostic ignored "-Wstringop-overflow"
+    memcpy(&extended_cmds[copy_start], submit->pCommandBufferInfos, sizeof(VkCommandBufferSubmitInfo) * cmd_count);
+    #pragma GCC diagnostic pop
+
+    if (is_first)
+    {
+        extended_cmds[0].sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        extended_cmds[0].pNext = NULL;
+        extended_cmds[0].commandBuffer = res.query_pool_top_of_pipe->buffer;
+        extended_cmds[0].deviceMask = device_mask;
+    }
+
+    if (is_last)
+    {
+        extended_cmds[ext_cmds_size-1].sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        extended_cmds[ext_cmds_size-1].pNext = NULL;
+        extended_cmds[ext_cmds_size-1].commandBuffer = res.query_pool->buffer;
+        extended_cmds[ext_cmds_size-1].deviceMask = device_mask;
+    }
+
+    submit->commandBufferInfoCount = ext_cmds_size;
+    submit->pCommandBufferInfos = extended_cmds;
+    return res;
+}
+
+
+
 static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queue,
-        const struct d3d12_command_queue_submission_execute *exec,
+        struct d3d12_command_queue_submission_execute *exec, // todo: changed to non-const, because we store the vulkan-submit-id - we may only need it though for the fence-info
         VkCommandBufferSubmitInfo *transition_cmd,
         const VkSemaphoreSubmitInfo *transition_semaphore)
 {
@@ -24340,6 +24455,15 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
     bool fallback;
     VkResult vr;
     HRESULT hr;
+
+    struct pacer_query_pool* query_pool;
+    struct pacer_query_pool* query_pool_top_of_pipe;
+    struct pacer_cmd_injection cmd_injection;
+    VkCommandBufferSubmitInfo extended_cmds_stack[64];
+
+    query_pool = NULL;
+    query_pool_top_of_pipe = NULL;
+
 
     TRACE("queue %p, command_list_count %u, command_lists %p.\n",
           command_queue, exec->cmd_count, exec->cmd);
@@ -24555,6 +24679,10 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
             binary_semaphore_info->stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         }
 
+        cmd_injection = inject_pacer_timestamps(is_first, is_last, submit, cmd_count,
+            extended_cmds_stack, (cmd_count > 0) ? exec->cmd[cmd_index-1].deviceMask : 0,
+            command_queue->pacer_queues, exec );
+
         /* If we don't use serializing semaphore, we have to ensure that the last command buffer
          * in a submit is not a fallback submit. */
         assert(!is_last || command_queue->serializing_semaphore || !fallback);
@@ -24585,6 +24713,12 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
 
         if (is_first)
             d3d12_command_queue_finalize_waits(command_queue, vr);
+
+        vkd3d_free( cmd_injection.extended_cmds_heap );
+        if (cmd_injection.query_pool)
+            query_pool = cmd_injection.query_pool;
+        if (cmd_injection.query_pool_top_of_pipe)
+            query_pool_top_of_pipe = cmd_injection.query_pool_top_of_pipe;
 
         VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(command_queue->device, vr == VK_ERROR_DEVICE_LOST);
 
@@ -24629,6 +24763,7 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
         vkd3d_renderdoc_command_queue_end_capture(command_queue);
 #endif
 
+    hr = 0;
     vkd3d_queue_release(vkd3d_queue);
 
     /* After a proper submit we have to queue up some work which is tied to this submission:
@@ -24643,6 +24778,12 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
         memset(&fence_info, 0, sizeof(fence_info));
         fence_info.vk_semaphore = vkd3d_queue->submission_timeline;
         fence_info.vk_semaphore_value = signal_semaphore_infos[0].value;
+        fence_info.pacer_command_submit_id = exec->pacer_command_submit_id;
+        fence_info.pacer_vulkan_submit_id = exec->pacer_vulkan_submit_id;
+        fence_info.pacer_query_pool = query_pool;
+
+//        _INFO("registering fence info: command_id %"
+//            PRIu64 ", vulkan_id %" PRIu64 " \n", fence_info.pacer_command_submit_id, fence_info.pacer_vulkan_submit_id);
 
         submission_info = vkd3d_waiting_fence_set_callback(&fence_info,
                 &vkd3d_waiting_fence_release_submission, sizeof(*submission_info));
@@ -24654,7 +24795,21 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
         if (FAILED(hr = vkd3d_enqueue_timeline_semaphore(&command_queue->fence_worker, &fence_info, &exec->timeline_cookie)))
         {
             ERR("Failed to enqueue timeline semaphore.\n");
+            if (query_pool)
+            {
+                // might trigger an out-of-order return log error, should be harmless
+                pacer_vulkan_queue_free_query_pool( command_queue->pacer_queues.vulkan_queue, query_pool );
+            }
         }
+    }
+
+    if (query_pool_top_of_pipe)
+    {
+        pacer_vulkan_queue_push_query_pool_top_of_pipe(
+            command_queue->pacer_queues.vulkan_queue,
+            query_pool_top_of_pipe,
+            exec->pacer_vulkan_submit_id,
+            vr == VK_SUCCESS && SUCCEEDED(hr));
     }
 }
 
@@ -25372,6 +25527,7 @@ static HRESULT d3d12_command_queue_init(struct d3d12_command_queue *queue,
         struct d3d12_device *device, const D3D12_COMMAND_QUEUE_DESC *desc, struct vkd3d_queue_family_info *family_info)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    struct pacer_vulkan_queue_info vk_queue_info;
     HRESULT hr;
     int rc;
 
@@ -25429,6 +25585,12 @@ static HRESULT d3d12_command_queue_init(struct d3d12_command_queue *queue,
         goto fail_swapchain_factory;
 
     d3d12_device_add_ref(queue->device = device);
+
+    vk_queue_info.family_index = queue->vkd3d_queue->vk_family_index;
+    vk_queue_info.queue_flags = queue->vkd3d_queue->vk_queue_flags;
+    vk_queue_info.timestamp_valid_bits = device->queue_families[queue->vkd3d_queue->vk_family_index]->timestamp_bits;
+    queue->pacer_queues = pacer_register_queues(
+        device->pacer_device, queue, queue->desc.Type, queue->vkd3d_queue, vk_queue_info);
 
     if (FAILED(hr = vkd3d_fence_worker_start(&queue->fence_worker, queue, device)))
         goto fail_fence_worker_start;
@@ -25562,7 +25724,7 @@ void vkd3d_release_vk_queue(ID3D12CommandQueue *queue)
     submit_info.signalSemaphoreInfoCount = 1;
     submit_info.pSignalSemaphoreInfos = &semaphore_info;
 
-    vr = VK_CALL(vkQueueSubmit2(d3d12_queue->vkd3d_queue->vk_queue, 1, &submit_info,
+    vr = VK_CALL(vkQueueSubmit2(d3d12_queue->vkd3d_queue->vk_queue, 1, &submit_info, // pacer note: skip
             vkd3d_queue_get_signal_fence_proxy_locked(d3d12_queue->vkd3d_queue)));
     VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(d3d12_queue->device, vr == VK_ERROR_DEVICE_LOST);
 

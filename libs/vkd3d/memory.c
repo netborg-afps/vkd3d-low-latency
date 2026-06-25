@@ -455,7 +455,7 @@ static HRESULT vkd3d_memory_transfer_queue_flush_locked(struct vkd3d_memory_tran
     submit_info.signalSemaphoreInfoCount = ARRAY_SIZE(signal_semaphore_infos);
     submit_info.pSignalSemaphoreInfos = signal_semaphore_infos;
 
-    vr = VK_CALL(vkQueueSubmit2(vk_queue, 1, &submit_info, VK_NULL_HANDLE));
+    vr = VK_CALL(vkQueueSubmit2(vk_queue, 1, &submit_info, VK_NULL_HANDLE)); // pacer note: forward with memory transfer hint
     vkd3d_queue_release(queue->vkd3d_queue);
 
     VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(queue->device, vr == VK_ERROR_DEVICE_LOST);

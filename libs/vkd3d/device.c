@@ -4715,6 +4715,7 @@ static void d3d12_device_destroy(struct d3d12_device *device)
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     size_t i, j;
 
+    pacer_destroy_device(device->pacer_device);
     d3d_destruction_notifier_free(&device->destruction_notifier);
 
     if (device->internal_sparse_queue)
@@ -10855,6 +10856,8 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
         struct vkd3d_instance *instance, const struct vkd3d_device_create_info *create_info)
 {
     const struct vkd3d_vk_device_procs *vk_procs;
+    struct pacer_device_properties pacer_device_properties;
+    struct pacer_device_vk_procs pacer_device_vk_procs;
     HRESULT hr;
     int rc;
 
@@ -10952,6 +10955,31 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
         goto out_cleanup_queue_timeline_trace;
 
     vkd3d_scratch_pool_init(device);
+
+    memset(&pacer_device_properties, 0, sizeof(struct pacer_device_properties));
+    memset(&pacer_device_vk_procs, 0, sizeof(struct pacer_device_vk_procs));
+
+    pacer_device_properties.vk_device = device->vk_device;
+    pacer_device_properties.timestamp_period = device->device_info.properties2.properties.limits.timestampPeriod;
+    pacer_device_properties.khrCalibratedTimestamps = device->vk_info.KHR_calibrated_timestamps;
+
+    pacer_device_vk_procs.vkCreateQueryPool = device->vk_procs.vkCreateQueryPool;
+    pacer_device_vk_procs.vkDestroyQueryPool = device->vk_procs.vkDestroyQueryPool;
+    pacer_device_vk_procs.vkResetQueryPool = device->vk_procs.vkResetQueryPool;
+    pacer_device_vk_procs.vkCmdResetQueryPool = device->vk_procs.vkCmdResetQueryPool;
+    pacer_device_vk_procs.vkGetQueryPoolResults = device->vk_procs.vkGetQueryPoolResults;
+    pacer_device_vk_procs.vkCreateCommandPool = device->vk_procs.vkCreateCommandPool;
+    pacer_device_vk_procs.vkDestroyCommandPool = device->vk_procs.vkDestroyCommandPool;
+    pacer_device_vk_procs.vkAllocateCommandBuffers = device->vk_procs.vkAllocateCommandBuffers;
+    pacer_device_vk_procs.vkFreeCommandBuffers = device->vk_procs.vkFreeCommandBuffers;
+    pacer_device_vk_procs.vkBeginCommandBuffer = device->vk_procs.vkBeginCommandBuffer;
+    pacer_device_vk_procs.vkCmdWriteTimestamp2 = device->vk_procs.vkCmdWriteTimestamp2;
+    pacer_device_vk_procs.vkEndCommandBuffer = device->vk_procs.vkEndCommandBuffer;
+    pacer_device_vk_procs.vkGetCalibratedTimestampsKHR = device->vk_procs.vkGetCalibratedTimestampsKHR;
+    pacer_device_vk_procs.vkGetPhysicalDeviceCalibrateableTimeDomainsKHR
+        = device->vk_procs.vkGetPhysicalDeviceCalibrateableTimeDomainsKHR;
+
+    device->pacer_device = pacer_create_device(&pacer_device_properties, &pacer_device_vk_procs);
 
 #ifdef VKD3D_ENABLE_BREADCRUMBS
     vkd3d_breadcrumb_tracer_init_barrier_hashes(&device->breadcrumb_tracer);

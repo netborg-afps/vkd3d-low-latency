@@ -1121,30 +1121,33 @@ static BOOL STDMETHODCALLTYPE d3d12_low_latency_device_SupportsLowLatency(d3d_lo
     struct d3d12_device *device;
 
     device = d3d12_device_from_ID3DLowLatencyDevice(iface);
+    if (device->pacer_device)
+        return true;
 
     return device->vk_info.NV_low_latency2;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d12_low_latency_device_LatencySleep(d3d_low_latency_device_iface *iface)
 {
-    struct dxgi_vk_swap_chain *low_latency_swapchain;
+    // struct dxgi_vk_swap_chain *low_latency_swapchain;
     struct d3d12_device *device;
 
     device = d3d12_device_from_ID3DLowLatencyDevice(iface);
+    NvAPI_sleep(device->pacer_device);
 
-    if (!device->vk_info.NV_low_latency2)
-        return E_NOTIMPL;
-
-    spinlock_acquire(&device->low_latency_swapchain_spinlock);
-    if ((low_latency_swapchain = device->swapchain_info.low_latency_swapchain))
-        dxgi_vk_swap_chain_incref(low_latency_swapchain);
-    spinlock_release(&device->low_latency_swapchain_spinlock);
-
-    if (low_latency_swapchain)
-    {
-        dxgi_vk_swap_chain_latency_sleep(low_latency_swapchain);
-        dxgi_vk_swap_chain_decref(low_latency_swapchain);
-    }
+    // if (!device->vk_info.NV_low_latency2)
+    //     return E_NOTIMPL;
+    //
+    // spinlock_acquire(&device->low_latency_swapchain_spinlock);
+    // if ((low_latency_swapchain = device->swapchain_info.low_latency_swapchain))
+    //     dxgi_vk_swap_chain_incref(low_latency_swapchain);
+    // spinlock_release(&device->low_latency_swapchain_spinlock);
+    //
+    // if (low_latency_swapchain)
+    // {
+    //     dxgi_vk_swap_chain_latency_sleep(low_latency_swapchain);
+    //     dxgi_vk_swap_chain_decref(low_latency_swapchain);
+    // }
 
     return S_OK;
 }
@@ -1153,40 +1156,42 @@ static HRESULT STDMETHODCALLTYPE d3d12_low_latency_device_SetLatencySleepMode(d3
         BOOL low_latency_mode, BOOL low_latency_boost,
         UINT32 minimum_interval_us)
 {
-    struct dxgi_vk_swap_chain *low_latency_swapchain;
+    // struct dxgi_vk_swap_chain *low_latency_swapchain;
     struct d3d12_device *device;
-
     device = d3d12_device_from_ID3DLowLatencyDevice(iface);
 
-    if (!device->vk_info.NV_low_latency2)
-        return E_NOTIMPL;
+    NvAPI_setSleepMode(device->pacer_device, low_latency_mode, minimum_interval_us);
 
-    spinlock_acquire(&device->low_latency_swapchain_spinlock);
-    device->swapchain_info.mode = low_latency_mode;
-    device->swapchain_info.boost = low_latency_boost;
-    device->swapchain_info.minimum_us = minimum_interval_us;
-    if ((low_latency_swapchain = device->swapchain_info.low_latency_swapchain))
-        dxgi_vk_swap_chain_incref(low_latency_swapchain);
-    spinlock_release(&device->low_latency_swapchain_spinlock);
-
-    if (low_latency_swapchain)
-    {
-        dxgi_vk_swap_chain_set_latency_sleep_mode(low_latency_swapchain, low_latency_mode, low_latency_boost, minimum_interval_us);
-        dxgi_vk_swap_chain_decref(low_latency_swapchain);
-    }
+    // if (!device->vk_info.NV_low_latency2)
+    //     return E_NOTIMPL;
+    //
+    // spinlock_acquire(&device->low_latency_swapchain_spinlock);
+    // device->swapchain_info.mode = low_latency_mode;
+    // device->swapchain_info.boost = low_latency_boost;
+    // device->swapchain_info.minimum_us = minimum_interval_us;
+    // if ((low_latency_swapchain = device->swapchain_info.low_latency_swapchain))
+    //     dxgi_vk_swap_chain_incref(low_latency_swapchain);
+    // spinlock_release(&device->low_latency_swapchain_spinlock);
+    //
+    // if (low_latency_swapchain)
+    // {
+    //     dxgi_vk_swap_chain_set_latency_sleep_mode(low_latency_swapchain, low_latency_mode, low_latency_boost, minimum_interval_us);
+    //     dxgi_vk_swap_chain_decref(low_latency_swapchain);
+    // }
 
     return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d12_low_latency_device_SetLatencyMarker(d3d_low_latency_device_iface *iface, UINT64 frameID, UINT32 markerType)
 {
-    struct dxgi_vk_swap_chain *low_latency_swapchain;
+    // struct dxgi_vk_swap_chain *low_latency_swapchain;
     VkLatencyMarkerNV vk_marker;
     struct d3d12_device *device;
     uint64_t internal_frame_id;
 
     device = d3d12_device_from_ID3DLowLatencyDevice(iface);
     vk_marker = (VkLatencyMarkerNV)markerType;
+    NvAPI_setLatencyMarker(device->pacer_device, frameID, vk_marker);
 
     if (!device->vk_info.NV_low_latency2)
         return E_NOTIMPL;
@@ -1226,42 +1231,51 @@ static HRESULT STDMETHODCALLTYPE d3d12_low_latency_device_SetLatencyMarker(d3d_l
             break;
     }
 
-    spinlock_acquire(&device->low_latency_swapchain_spinlock);
-    if ((low_latency_swapchain = device->swapchain_info.low_latency_swapchain))
-        dxgi_vk_swap_chain_incref(low_latency_swapchain);
-    spinlock_release(&device->low_latency_swapchain_spinlock);
-
-    if (low_latency_swapchain)
-    {
-        dxgi_vk_swap_chain_set_latency_marker(low_latency_swapchain, internal_frame_id, vk_marker, true);
-        dxgi_vk_swap_chain_decref(low_latency_swapchain);
-    }
+    // spinlock_acquire(&device->low_latency_swapchain_spinlock);
+    // if ((low_latency_swapchain = device->swapchain_info.low_latency_swapchain))
+    //     dxgi_vk_swap_chain_incref(low_latency_swapchain);
+    // spinlock_release(&device->low_latency_swapchain_spinlock);
+    //
+    // if (low_latency_swapchain)
+    // {
+    //     dxgi_vk_swap_chain_set_latency_marker(low_latency_swapchain, internal_frame_id, vk_marker, true);
+    //     dxgi_vk_swap_chain_decref(low_latency_swapchain);
+    // }
 
     return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d12_low_latency_device_GetLatencyInfo(d3d_low_latency_device_iface *iface, D3D12_LATENCY_RESULTS *latency_results)
 {
-    struct dxgi_vk_swap_chain *low_latency_swapchain;
-    struct d3d12_device *device;
+    return E_NOTIMPL;
 
-    device = d3d12_device_from_ID3DLowLatencyDevice(iface);
+    // if (latency_results)
+    // {
+    //     memset(latency_results, 0, sizeof(D3D12_LATENCY_RESULTS));
+    //     latency_results->version = 1;
+    // }
+    // return S_OK;
 
-    if (!device->vk_info.NV_low_latency2)
-        return E_NOTIMPL;
-
-    spinlock_acquire(&device->low_latency_swapchain_spinlock);
-    if ((low_latency_swapchain = device->swapchain_info.low_latency_swapchain))
-        dxgi_vk_swap_chain_incref(low_latency_swapchain);
-    spinlock_release(&device->low_latency_swapchain_spinlock);
-
-    if (low_latency_swapchain)
-    {
-        dxgi_vk_swap_chain_get_latency_info(low_latency_swapchain, latency_results);
-        dxgi_vk_swap_chain_decref(low_latency_swapchain);
-    }
-
-    return S_OK;
+    // struct dxgi_vk_swap_chain *low_latency_swapchain;
+    // struct d3d12_device *device;
+    //
+    // device = d3d12_device_from_ID3DLowLatencyDevice(iface);
+    //
+    // if (!device->vk_info.NV_low_latency2)
+    //     return E_NOTIMPL;
+    //
+    // spinlock_acquire(&device->low_latency_swapchain_spinlock);
+    // if ((low_latency_swapchain = device->swapchain_info.low_latency_swapchain))
+    //     dxgi_vk_swap_chain_incref(low_latency_swapchain);
+    // spinlock_release(&device->low_latency_swapchain_spinlock);
+    //
+    // if (low_latency_swapchain)
+    // {
+    //     dxgi_vk_swap_chain_get_latency_info(low_latency_swapchain, latency_results);
+    //     dxgi_vk_swap_chain_decref(low_latency_swapchain);
+    // }
+    //
+    // return S_OK;
 }
 
 CONST_VTBL struct ID3DLowLatencyDeviceVtbl d3d_low_latency_device_vtbl =
