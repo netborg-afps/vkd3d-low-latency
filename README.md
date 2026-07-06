@@ -1,4 +1,89 @@
-# vkd3d-proton
+# vkd3d-low-latency
+
+Enhances [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) with low-latency frame pacing capabilities to improve game responsiveness and input lag. It also improves latency stability over time, usually resulting in a more accurate playback speed of the generated video.
+
+It implements support for both the Nvidia Reflex API and Waitable DXGI Swapchains. *(Note: A game must utilize either one of these for this low-latency frame pacing to be active).*
+
+By minimizing latency between the DX12 application timeline and the Vulkan GPU timeline, this implementation bypasses standard translation bottlenecks. As a result, it delivers measurably lower input lag than the default NVAPI-to-Vulkan Reflex translation.
+
+While Reflex is widely known in esports, Waitable Swapchains are the established DirectX 12 standard used by many modern game engines to natively prevent frame queuing and thereby reduce input lag. The provided frame pacing overrides the default DXGI wait behavior to achieve Reflex-like latency reduction for a wide range of games.
+
+High framerates are maintained using a maximum of three in-flight frames. Crucially, the Reflex implementation is hardware-agnostic —  allowing AMD users to benefit from Nvidia Reflex in supported titles (see [this discussion thread](https://github.com/netborg-afps/vkd3d-low-latency/discussions/3)).
+
+Usage of [sched_ext](https://wiki.cachyos.org/configuration/sched-ext/) schedulers recommended for improved performance. If you don't know which to pick, `scx_cosmos -c 0 -p 0` is usually performing really well.
+
+## Installation
+
+To use these low-latency files, you need to replace the default d3d12.dll and d3d12core.dll files inside a custom Proton build. (Note: You generally only need the 64-bit files).
+
+#### Use a Custom Proton Build
+
+Do not modify official Valve Proton directories (like Proton Experimental) directly, as Steam updates will automatically overwrite your changes. Apply modifications to custom builds located in your local compatibilitytools.d folder instead.
+
+If this directory does not exist, you must create it manually. Depending on your Steam installation, the path is:
+
+- Native Steam: `~/.local/share/Steam/compatibilitytools.d/`
+- Flatpak Steam: `~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d/`
+
+#### Replace the DLLs
+
+Navigate to the internal vkd3d-proton directory of your custom Proton build and overwrite the existing files with the modified versions.
+
+The 64-bit files are typically located here:
+
+`.local/share/Steam/compatibilitytools.d/[your-proton-version]/files/lib/wine/vkd3d-proton/x86_64-windows/`
+
+#### Alternative
+
+Another way it can be used, is by copying the .dll files directly into the folder where the game executable is located.
+
+## Options 
+
+`VKD3D_FRAME_RATE`: FPS limiting is fully integrated into the frame pacing logic.
+
+`VKD3D_LOW_LATENCY_OFFSET`: Accepts values from `0` to `500` (microseconds). This shifts the frame delivery prediction further into the future, allowing you to tune the pacing towards even lower latency by giving up a small amount of FPS.
+
+- Default (`100`): Acts as a safe baseline since vkd3d-internal blit times are not yet measured. This provides a great balance between maximum FPS and tight pacing.
+- Low-Latency Tuning (`150` - `300`): Recommended for competitive titles where you want the absolute snappiest mouse input and are willing to trade a slight amount of FPS.
+
+
+## Waitable DXGI Swapchains Verification
+
+You can verify if a game is actively utilizing Waitable DXGI Swapchains by checking the vkd3d log. This is typically done by enabling Proton logging (e.g., adding PROTON_LOG=1 %command% to your Steam launch options) and searching the generated log file for those kind of lines: 
+`waitable dxgi swapchain present percentage: 99.9%, total frames 32768`.
+
+- Near 100%: The game actively uses Waitable Swapchains (Good).
+- 0% (or line missing): The game engine does not use this feature (Inactive).
+
+*(Note: An ongoing list of verified games can be found [in this discussion thread](https://github.com/netborg-afps/vkd3d-low-latency/discussions/2)).*
+
+## Status & Limitations
+
+**Waitable DXGI Swapchains**: To prevent ambiguity in matching internal pacer-frames and to ensure the absolute lowest latency, it is currently enforced that frames do not overlap on the CPU prior to dxgi.present(). This cuts down on CPU-side parallelism and could theoretically impact maximum FPS in certain CPU-bound scenarios, though this has not been observed in tested games.
+
+**Reflex API Requirements**: Currently requires games to send both the `Simulation Start` and `Present Begin` markers to perfectly map to internal pacer-frames. (Note: This is equivalent to what Anti-Lag 2 requires natively).
+
+**AMD Anti-Lag 2**: Currently not supported. Many game engines enforce driver-level vendor checks, making it impossible to use or test this feature on non-AMD hardware. Support will be explored in the future. In the meantime AMD users can already use the Reflex path in titles that support both.
+
+**Intel GPUs**: This frame pacing implementation currently relies on 64-bit Vulkan timestamps. Because Intel drivers only support 36-bit timestamps, Intel GPUs are currently not supported. Support for 36-bit timestamps is planned for a future update.
+
+**Frame Generation** is currently not supported. Will be investigated in the future.
+
+## Roadmap
+
+The following features are planned for future releases. The first two have already been successfully implemented in `dxvk-low-latency` and will be integrated to this DX12 pacing eventually:
+
+**VRR Pacing Mode**: A dedicated, community-favorite frame pacing mode tailored specifically for Variable Refresh Rate displays. It dynamically syncs frame delivery with your monitor's refresh window, improving smoothness and latency consistency on G-Sync/FreeSync setups.
+
+**Gpu-Progress Feature**: An advanced frame pacing mechanism that tracks GPU execution progress in real-time before eventually committing to starting a new frame, delivering even tighter frame time consistency and pushing responsiveness to the absolute maximum.
+
+**VK_EXT_present_timing Integration**: Leveraging existing infrastructure within upstream vkd3d-proton, this feature will utilize Vulkan's presentation timing extension. Designed for users who prioritize absolute visual consistency, it will maximize smoothness in exchange for a marginal latency tax. *(Note: This mode will require a VRR display with V-Sync enabled).*
+
+
+##
+
+
+# vkd3d-proton (Original Description)
 
 vkd3d-proton is a fork of VKD3D, which aims to implement the full Direct3D 12 API on top of Vulkan.
 The project serves as the development effort for Direct3D 12 support in [Proton](https://github.com/ValveSoftware/Proton).

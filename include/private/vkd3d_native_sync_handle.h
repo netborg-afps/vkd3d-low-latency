@@ -19,6 +19,10 @@
 #ifndef __VKD3D_NATIVE_SYNC_HANDLE_H
 #define __VKD3D_NATIVE_SYNC_HANDLE_H
 
+#define VKD3D_DBG_CHANNEL VKD3D_DBG_CHANNEL_API
+#include "vkd3d_debug.h"
+#include "vkd3d_dxgi.h"
+
 enum vkd3d_native_sync_handle_type
 {
     VKD3D_NATIVE_SYNC_HANDLE_TYPE_NONE = 0,
@@ -182,6 +186,26 @@ static inline HRESULT vkd3d_native_sync_handle_create(UINT initial,
         hr = E_OUTOFMEMORY;
 #endif
     handle->type = hr == S_OK ? type : VKD3D_NATIVE_SYNC_HANDLE_TYPE_NONE;
+    return hr;
+}
+
+static inline HRESULT vkd3d_native_pacer_sync_handle_create(UINT initial, UINT maxVal,
+        vkd3d_native_sync_handle *handle)
+{
+    VKD3D_UNUSED unsigned int flags;
+    HRESULT hr = S_OK;
+
+#ifdef _WIN32
+    if (!(handle->handle = CreateSemaphoreA(NULL, initial, maxVal, NULL)))
+        hr = HRESULT_FROM_WIN32(GetLastError());
+#else
+    flags = EFD_CLOEXEC;
+    if (type == VKD3D_NATIVE_SYNC_HANDLE_TYPE_SEMAPHORE)
+        flags |= EFD_SEMAPHORE;
+    if ((handle->fd = eventfd(initial, flags)) < 0)
+        hr = E_OUTOFMEMORY;
+#endif
+    handle->type = hr == S_OK ? VKD3D_NATIVE_SYNC_HANDLE_TYPE_SEMAPHORE : VKD3D_NATIVE_SYNC_HANDLE_TYPE_NONE;
     return hr;
 }
 

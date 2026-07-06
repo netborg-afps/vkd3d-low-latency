@@ -44,6 +44,7 @@
 #include "vkd3d_native_sync_handle.h"
 #include "config_flags.h"
 #include "copy_utils.h"
+#include "framepacer/framepacer_bridge.h"
 #include <assert.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -271,6 +272,9 @@ struct vkd3d_fence_wait_info
 {
     VkSemaphore vk_semaphore;
     uint64_t vk_semaphore_value;
+    uint64_t pacer_command_submit_id;
+    uint64_t pacer_vulkan_submit_id;
+    struct pacer_query_pool* pacer_query_pool;
     vkd3d_waiting_fence_callback release_callback;
     unsigned char userdata[32];
 };
@@ -3735,6 +3739,8 @@ struct d3d12_command_queue_submission_execute
     struct d3d12_command_allocator **command_allocators;
     UINT cmd_count;
     UINT num_command_allocators;
+    uint64_t pacer_command_submit_id;
+    uint64_t pacer_vulkan_submit_id;
     uint64_t low_latency_frame_id;
 
     struct vkd3d_initial_transition *transitions;
@@ -3841,6 +3847,7 @@ struct d3d12_command_queue
     D3D12_COMMAND_QUEUE_DESC desc;
 
     struct vkd3d_queue *vkd3d_queue;
+    struct pacer_queues pacer_queues;
 
     struct d3d12_device *device;
 
@@ -5753,6 +5760,7 @@ struct d3d12_device
     pthread_mutex_t mutex;
     pthread_mutex_t global_submission_mutex;
     spinlock_t low_latency_swapchain_spinlock;
+    pacer_device_handle pacer_device;
 
     VkPhysicalDeviceMemoryProperties memory_properties;
 

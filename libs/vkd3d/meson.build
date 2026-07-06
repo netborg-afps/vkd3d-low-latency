@@ -89,7 +89,13 @@ vkd3d_src = [
   'swapchain.c',
   'queue_timeline.c',
   'address_binding_tracker.c',
-  'workgraphs.c'
+  'workgraphs.c',
+  'framepacer/framepacer_bridge.cpp',
+  'framepacer/framepacer.cpp',
+  'framepacer/device.cpp',
+  'framepacer/calibrated_device_timestamps.cpp',
+  'framepacer/util/util_sleep.cpp',
+  'framepacer/util/thread.cpp'
 ]
 
 if enable_renderdoc
@@ -110,6 +116,7 @@ endif
 
 if vkd3d_platform == 'windows'
   vkd3d_src += ['shared_metadata.c']
+  vkd3d_extra_libs += meson.get_compiler('cpp').find_library('synchronization', required : true)
 endif
 
 if enable_profiling
