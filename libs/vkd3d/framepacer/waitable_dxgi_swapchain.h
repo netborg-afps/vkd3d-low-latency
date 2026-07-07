@@ -21,13 +21,18 @@ namespace pacer {
 
         }
 
+        void releaseSemaphore( void* vkd3d_swapchain, int count ) {
+
+            vkd3d_native_sync_handle* latencyEvent = m_device->getLatencyEvent(vkd3d_swapchain);
+            if (latencyEvent && vkd3d_native_sync_handle_is_valid(*latencyEvent))
+                vkd3d_native_sync_handle_release(*latencyEvent, count);
+
+        }
+
         void sleep( void* vkd3d_swapchain ) {
 
             if (m_device->m_activeType != Device::WaitableDXGISwapchain) {
-                vkd3d_native_sync_handle* latencyEvent = m_device->getLatencyEvent(vkd3d_swapchain);
-                if (latencyEvent && vkd3d_native_sync_handle_is_valid(*latencyEvent))
-                    vkd3d_native_sync_handle_release(*latencyEvent, 3);
-
+                releaseSemaphore( vkd3d_swapchain, 3 );
                 return;
             }
 

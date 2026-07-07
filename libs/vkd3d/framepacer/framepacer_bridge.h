@@ -83,6 +83,7 @@ void pacer_vulkan_queue_free_query_pool( pacer_vulkan_queue_handle vulkan_queue,
 void pacer_vulkan_queue_push_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue, struct pacer_query_pool* query_pool, uint64_t vulkan_submit_id, bool push_into_queue );
 
 uint64_t pacer_notify_present( pacer_device_handle device, void* vkd3d_swapchain );
+void pacer_notify_aborted_present( pacer_device_handle device, void* vkd3d_swapchain );
 
 //void pacer_notify_gpu_present_end( pacer_device_handle handle, uint64_t frameId );
 

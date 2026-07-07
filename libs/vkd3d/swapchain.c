@@ -1134,9 +1134,15 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain2 *i
     (void)pPresentParameters;
 
     if (dxgi_vk_swap_chain_present_is_occluded(chain))
+    {
+        pacer_notify_aborted_present(chain->queue->device->pacer_device, chain);
         return DXGI_STATUS_OCCLUDED;
+    }
     if (PresentFlags & DXGI_PRESENT_TEST)
+    {
+        pacer_notify_aborted_present(chain->queue->device->pacer_device, chain);
         return S_OK;
+    }
 
     assert(chain->user.index < chain->desc.BufferCount);
 

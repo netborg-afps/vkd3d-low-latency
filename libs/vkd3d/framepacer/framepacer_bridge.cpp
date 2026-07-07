@@ -139,3 +139,10 @@ uint64_t pacer_notify_present( pacer_device_handle device, void* vkd3d_swapchain
     // return a frame_id when we'll make use of it (present_timing, present_wait, etc.)
     return 0;
 }
+
+void pacer_notify_aborted_present( pacer_device_handle device, void* vkd3d_swapchain ) {
+    assert(device);
+    assert(vkd3d_swapchain);
+
+    DEVICE(device)->m_pacer->m_waitableDxgiSwapchain.releaseSemaphore( vkd3d_swapchain, 1 );
+}
