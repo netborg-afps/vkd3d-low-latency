@@ -160,7 +160,8 @@ namespace pacer {
 
     void Device::assignPrimaryCommandQueue( void* vkd3d_command_queue ) {
         {   std::lock_guard<dxvk::mutex> lock(m_queueMutex);
-            for (CommandQueue* commandQueue : m_commandQueues) {
+            for (auto it = m_commandQueues.rbegin(); it != m_commandQueues.rend(); ++it) {
+                CommandQueue* commandQueue = *it;
                 if (commandQueue->m_properties.vkd3d_command_queue == vkd3d_command_queue) {
                     m_primaryCommandQueue = commandQueue;
                     return;
