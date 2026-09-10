@@ -4080,35 +4080,25 @@ void dxgi_vk_swap_chain_set_latency_sleep_mode(struct dxgi_vk_swap_chain *chain,
 void dxgi_vk_swap_chain_set_latency_marker(struct dxgi_vk_swap_chain *chain,
         uint64_t frameID, VkLatencyMarkerNV marker, bool from_app)
 {
-    // const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
-    // VkSetLatencyMarkerInfoNV latency_marker_info;
-    //
-    // if (from_app && (marker == VK_LATENCY_MARKER_OUT_OF_BAND_PRESENT_START_NV
-    //                  || marker == VK_LATENCY_MARKER_OUT_OF_BAND_PRESENT_END_NV))
-    // {
-    //     /* Record the frame ID for OUT_OF_BAND_PRESENT markers. We'll send
-    //      * these markers later on our background present thread. */
-    //     vkd3d_atomic_uint64_store_explicit(&chain->queue->device->frame_markers.out_of_band_present,
-    //             marker == VK_LATENCY_MARKER_OUT_OF_BAND_PRESENT_START_NV ? frameID : 0,
-    //             vkd3d_memory_order_release);
-    //     return;
-    // }
-    //
-    // memset(&latency_marker_info, 0, sizeof(latency_marker_info));
-    // latency_marker_info.sType = VK_STRUCTURE_TYPE_SET_LATENCY_MARKER_INFO_NV;
-    // latency_marker_info.pNext = NULL;
-    // latency_marker_info.presentID = frameID;
-    // latency_marker_info.marker = marker;
-    //
-    // if (chain->debug_latency && marker == VK_LATENCY_MARKER_PRESENT_START_NV)
-    //     INFO("Setting present frame marker %"PRIu64".\n", frameID);
-    //
-    // pthread_mutex_lock(&chain->present.low_latency_swapchain_lock);
-    //
-    // if (chain->present.vk_swapchain)
-    //     VK_CALL(vkSetLatencyMarkerNV(chain->queue->device->vk_device, chain->present.vk_swapchain, &latency_marker_info));
-    //
-    // pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
+    const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
+    VkSetLatencyMarkerInfoNV latency_marker_info;
+
+    if (!from_app)
+        return;
+
+    memset(&latency_marker_info, 0, sizeof(latency_marker_info));
+    latency_marker_info.sType = VK_STRUCTURE_TYPE_SET_LATENCY_MARKER_INFO_NV;
+    latency_marker_info.presentID = frameID;
+    latency_marker_info.marker = marker;
+
+    pthread_mutex_lock(&chain->present.low_latency_swapchain_lock);
+
+    if (chain->queue->device->vk_info.NV_low_latency2 &&
+            chain->present.vk_swapchain && vk_procs->vkSetLatencyMarkerNV)
+        VK_CALL(vkSetLatencyMarkerNV(chain->queue->device->vk_device,
+                chain->present.vk_swapchain, &latency_marker_info));
+
+    pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
 }
 
 void dxgi_vk_swap_chain_get_latency_info(struct dxgi_vk_swap_chain *chain, D3D12_LATENCY_RESULTS *latency_results)
@@ -4190,6 +4180,14 @@ ULONG dxgi_vk_swap_chain_incref(struct dxgi_vk_swap_chain *chain)
     return refcount;
 }
 
+void dxgi_vk_swap_chain_acquire_latency_marker_reference(struct dxgi_vk_swap_chain *chain)
+{
+    /* Swapchain cleanup accesses the queue, so retain both while the selected
+     * swapchain lock is dropped for the Vulkan call. */
+    dxgi_vk_swap_chain_incref(chain);
+    ID3D12CommandQueue_AddRef(&chain->queue->ID3D12CommandQueue_iface);
+}
+
 ULONG dxgi_vk_swap_chain_decref(struct dxgi_vk_swap_chain *chain)
 {
     unsigned int refcount = InterlockedDecrement(&chain->internal_refcount);
@@ -4205,6 +4203,83 @@ ULONG dxgi_vk_swap_chain_decref(struct dxgi_vk_swap_chain *chain)
 
     return refcount;
 }
+
+void dxgi_vk_swap_chain_release_latency_marker_reference(struct dxgi_vk_swap_chain *chain)
+{
+    struct d3d12_command_queue *queue = chain->queue;
+
+    /* The queue reference must outlive a possible final chain release. */
+    dxgi_vk_swap_chain_decref(chain);
+    ID3D12CommandQueue_Release(&queue->ID3D12CommandQueue_iface);
+}
+
+#ifdef VKD3D_ENABLE_TEST_HOOKS
+static dxgi_vk_swap_chain_marker_test_callback marker_test_callback;
+static void *marker_test_userdata;
+
+bool dxgi_vk_swap_chain_test_marker_init(struct d3d12_command_queue *queue,
+        IDXGIVkSwapChain **out)
+{
+    struct dxgi_vk_swap_chain *chain;
+
+    if (!(chain = vkd3d_calloc(1, sizeof(*chain))))
+        return false;
+
+    chain->IDXGIVkSwapChain_iface.lpVtbl = &dxgi_vk_swap_chain_vtbl;
+    chain->refcount = 1;
+    chain->internal_refcount = 1;
+    chain->queue = queue;
+    chain->desc.BufferCount = 2;
+    pthread_mutex_init(&chain->present.low_latency_swapchain_lock, NULL);
+    pthread_mutex_init(&chain->present.low_latency_state_update_lock, NULL);
+    pthread_mutex_init(&chain->frame_rate_limit.lock, NULL);
+    pthread_mutex_init(&chain->properties.lock, NULL);
+    pthread_mutex_init(&chain->timing.lock, NULL);
+
+    if (FAILED(dxgi_vk_swap_chain_init_waiter_thread(chain)))
+        goto fail;
+
+    pacer_register_swapchain(queue->device->pacer_device, chain, queue, chain->desc, NULL);
+    ID3D12CommandQueue_AddRef(&queue->ID3D12CommandQueue_iface);
+    *out = (IDXGIVkSwapChain *)&chain->IDXGIVkSwapChain_iface;
+    return true;
+
+fail:
+    pthread_mutex_destroy(&chain->timing.lock);
+    pthread_mutex_destroy(&chain->properties.lock);
+    pthread_mutex_destroy(&chain->frame_rate_limit.lock);
+    pthread_mutex_destroy(&chain->present.low_latency_state_update_lock);
+    pthread_mutex_destroy(&chain->present.low_latency_swapchain_lock);
+    vkd3d_free(chain);
+    return false;
+}
+
+void dxgi_vk_swap_chain_test_marker_register(struct d3d12_device *device,
+        IDXGIVkSwapChain *iface)
+{
+    d3d12_device_register_swapchain(device,
+            impl_from_IDXGIVkSwapChain((IDXGIVkSwapChain2 *)iface));
+}
+
+void dxgi_vk_swap_chain_test_marker_set_swapchain(IDXGIVkSwapChain *iface,
+        VkSwapchainKHR vk_swapchain)
+{
+    impl_from_IDXGIVkSwapChain((IDXGIVkSwapChain2 *)iface)->present.vk_swapchain = vk_swapchain;
+}
+
+void dxgi_vk_swap_chain_test_marker_set_callback(dxgi_vk_swap_chain_marker_test_callback callback,
+        void *userdata)
+{
+    marker_test_callback = callback;
+    marker_test_userdata = userdata;
+}
+
+void dxgi_vk_swap_chain_test_marker_invoke_callback(void)
+{
+    if (marker_test_callback)
+        marker_test_callback(marker_test_userdata);
+}
+#endif
 
 HRESULT dxgi_vk_swap_chain_factory_init(struct d3d12_command_queue *queue, struct dxgi_vk_swap_chain_factory *chain)
 {

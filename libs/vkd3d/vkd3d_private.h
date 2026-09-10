@@ -3813,6 +3813,21 @@ void dxgi_vk_swap_chain_get_latency_info(struct dxgi_vk_swap_chain *chain,
 
 ULONG dxgi_vk_swap_chain_incref(struct dxgi_vk_swap_chain *chain);
 ULONG dxgi_vk_swap_chain_decref(struct dxgi_vk_swap_chain *chain);
+void dxgi_vk_swap_chain_acquire_latency_marker_reference(struct dxgi_vk_swap_chain *chain);
+void dxgi_vk_swap_chain_release_latency_marker_reference(struct dxgi_vk_swap_chain *chain);
+
+#ifdef VKD3D_ENABLE_TEST_HOOKS
+typedef void (*dxgi_vk_swap_chain_marker_test_callback)(void *userdata);
+bool dxgi_vk_swap_chain_test_marker_init(struct d3d12_command_queue *queue,
+        IDXGIVkSwapChain **out);
+void dxgi_vk_swap_chain_test_marker_register(struct d3d12_device *device,
+        IDXGIVkSwapChain *iface);
+void dxgi_vk_swap_chain_test_marker_set_swapchain(IDXGIVkSwapChain *iface,
+        VkSwapchainKHR vk_swapchain);
+void dxgi_vk_swap_chain_test_marker_set_callback(dxgi_vk_swap_chain_marker_test_callback callback,
+        void *userdata);
+void dxgi_vk_swap_chain_test_marker_invoke_callback(void);
+#endif
 
 HRESULT dxgi_vk_swap_chain_factory_init(struct d3d12_command_queue *queue, struct dxgi_vk_swap_chain_factory *chain);
 
