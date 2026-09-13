@@ -56,6 +56,9 @@ struct pacer_queues {
     pacer_vulkan_queue_handle vulkan_queue;
 };
 
+uint64_t bench_section_begin();
+void bench_section_end(uint64_t t0_ns);
+
 bool pacer_is_running( pacer_device_handle device );
 pacer_device_handle pacer_create_device( struct pacer_device_properties* properties, struct pacer_device_vk_procs* vk_procs );
 void pacer_destroy_device( pacer_device_handle handle );

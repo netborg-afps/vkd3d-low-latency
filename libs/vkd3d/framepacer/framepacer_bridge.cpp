@@ -7,6 +7,8 @@
 #include "util/util_debug.h"
 #include "vkd3d_dxgi1_2.h"
 
+#include "util/util_benchmark.h"
+
 using namespace pacer;
 
 #define DEVICE(x) ((Device*) x)
@@ -14,6 +16,32 @@ using namespace pacer;
 #define VULKAN_QUEUE(x) ((VulkanQueue*) x)
 static std::atomic<bool> g_NvApi_sleepEnabled;
 static SleepValueFilter g_sleepValueFilter;
+
+
+Benchmark m_benchmark ("sync_overhead");
+Benchmark m_benchmark2 ("sync_overhead_2");
+
+
+uint64_t bench_section_begin() {
+    return std::chrono::high_resolution_clock::now().time_since_epoch().count();
+}
+
+void bench_section_end(uint64_t t0_ns) {
+    auto t1 = Benchmark::getTime();
+    auto t0 = std::chrono::time_point<std::chrono::high_resolution_clock>(std::chrono::nanoseconds(t0_ns));
+    m_benchmark.registerMeasurement(t0, t1);
+}
+
+uint64_t bench_section2_begin() {
+    return std::chrono::high_resolution_clock::now().time_since_epoch().count();
+}
+
+void bench_section2_end(uint64_t t0_ns) {
+    auto t1 = Benchmark::getTime();
+    auto t0 = std::chrono::time_point<std::chrono::high_resolution_clock>(std::chrono::nanoseconds(t0_ns));
+    m_benchmark2.registerMeasurement(t0, t1);
+}
+
 
 bool pacer_is_running( pacer_device_handle device ) {
     assert(device);
