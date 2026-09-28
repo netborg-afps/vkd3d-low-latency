@@ -67,6 +67,8 @@ struct pacer_queues pacer_register_queues( pacer_device_handle handle,
 void pacer_register_swapchain( pacer_device_handle handle, void* vkd3d_swapchain, void* vkd3d_command_queue, DXGI_SWAP_CHAIN_DESC1 desc, vkd3d_native_sync_handle* frame_latency_event );
 void pacer_unregister_swapchain( pacer_device_handle handle, void* vkd3d_swapchain );
 
+void pacer_notify_out_of_band_queue( pacer_device_handle handle, void* vkd3d_queue, VkOutOfBandQueueTypeNV type );
+
 void NvAPI_setSleepMode( pacer_device_handle handle, bool enable, UINT32 minimum_interval_us );
 void NvAPI_setLatencyMarker( pacer_device_handle handle, uint64_t frameId, VkLatencyMarkerNV marker );
 void NvAPI_sleep( pacer_device_handle handle );

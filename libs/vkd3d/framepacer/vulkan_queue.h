@@ -106,6 +106,12 @@ namespace pacer {
 
         }
 
+        void notifyOutOfBand( VkOutOfBandQueueTypeNV type )
+            { m_isOutOfBand.store( true ); }
+
+        bool isOutOfBand()
+            { return m_isOutOfBand.load( std::memory_order_acquire ); }
+
     private:
 
         void freeQueryPoolTopOfPipe(pacer_query_pool* queryPool) {
@@ -313,6 +319,7 @@ namespace pacer {
             uint64_t submitId;
         };
 
+        std::atomic<bool> m_isOutOfBand = { false };
         std::atomic<bool> m_stopped = { false };
         dxvk::thread m_thread;
         dxvk::condition_variable m_cond;

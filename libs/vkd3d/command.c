@@ -257,6 +257,7 @@ void vkd3d_set_queue_out_of_band(struct d3d12_device *device, struct vkd3d_queue
     queue_info.queueType = type;
 
     VK_CALL(vkQueueNotifyOutOfBandNV(queue->vk_queue, &queue_info));
+    pacer_notify_out_of_band_queue(queue->device->pacer_device, queue, type);
 }
 
 void vkd3d_queue_drain(struct vkd3d_queue *queue, struct d3d12_device *device)

@@ -57,6 +57,25 @@ void pacer_unregister_swapchain( pacer_device_handle handle, void* vkd3d_swapcha
     DEVICE(handle)->unregisterSwapchain(vkd3d_swapchain);
 }
 
+void pacer_notify_out_of_band_queue( pacer_device_handle handle, void* vkd3d_queue, VkOutOfBandQueueTypeNV type ) {
+    assert(handle);
+    std::vector<VulkanQueue*> vulkanQueues;
+    DEVICE(handle)->getVulkanQueues(vulkanQueues);
+
+    bool found = false;
+    for (VulkanQueue* queue : vulkanQueues) {
+        if (queue->m_properties.vkd3d_queue == vkd3d_queue) {
+            queue->notifyOutOfBand(type);
+            INFO( "marked queue %" PRIu64 " as out-of-band \n", (uintptr_t) vkd3d_queue );
+            found = true;
+        }
+    }
+
+    if (!found)
+        WARN( "requested to mark queue %" PRIu64 " as out-of-band failed, not found \n", (uintptr_t) vkd3d_queue );
+}
+
+
 uint64_t pacer_command_queue_notify_submit( pacer_command_queue_handle command_queue ) {
     assert(command_queue);
     return COMMAND_QUEUE(command_queue)->notifySubmit();
@@ -103,7 +122,9 @@ void pacer_vulkan_queue_push_query_pool_top_of_pipe( pacer_vulkan_queue_handle v
     VULKAN_QUEUE(vulkan_queue)->pushQueryPoolTopOfPipe(query_pool, vulkan_submit_id, push_into_queue);
 }
 
+
 void NvAPI_setSleepMode( pacer_device_handle handle, bool enable, UINT32 minimum_interval_us ) {
+    assert(handle);
     g_NvApi_sleepEnabled.store( enable, std::memory_order_release );
     DEVICE(handle)->m_activeType.store(
         enable ? Device::NVIDIA_Reflex : Device::WaitableDXGISwapchain,
@@ -113,8 +134,7 @@ void NvAPI_setSleepMode( pacer_device_handle handle, bool enable, UINT32 minimum
     g_sleepValueFilter.push(minimum_interval_us);
     uint32_t minInterval = g_sleepValueFilter.getMinInterval();
 
-    if (handle)
-        DEVICE(handle)->m_pacer->setFpsLimit(minInterval);
+    DEVICE(handle)->m_pacer->setFpsLimit(minInterval);
 }
 
 void NvAPI_setLatencyMarker( pacer_device_handle handle, uint64_t frameId, VkLatencyMarkerNV marker ) {

@@ -42,7 +42,7 @@ namespace pacer {
         }
 
         bool isAtEnd() {
-            return m_curIndex > m_lastIndex;
+            return m_vulkanQueue->isOutOfBand() || m_curIndex > m_lastIndex;
         }
 
         void operator++() {
