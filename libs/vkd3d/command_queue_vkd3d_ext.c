@@ -63,7 +63,7 @@ static HRESULT STDMETHODCALLTYPE d3d12_command_queue_vkd3d_ext_NotifyOutOfBandCo
     if (!command_queue->device->vk_info.NV_low_latency2)
         return E_NOTIMPL;
 
-    if (type != OUT_OF_BAND_RENDER && type != OUT_OF_BAND_PRESENT)
+    if (type != D3D12_OUT_OF_BAND_CQ_TYPE_RENDER && type != D3D12_OUT_OF_BAND_CQ_TYPE_PRESENT)
         return E_INVALIDARG;
 
     vk_queue_type = (VkOutOfBandQueueTypeNV)type;
@@ -74,8 +74,29 @@ static HRESULT STDMETHODCALLTYPE d3d12_command_queue_vkd3d_ext_NotifyOutOfBandCo
                 command_queue->device->queue_families[i]->out_of_band_queue)
         {
             struct vkd3d_queue *out_of_band_queue = command_queue->device->queue_families[i]->out_of_band_queue;
+
+            if (command_queue->last_submission_timeline_value != 0)
+                FIXME("Trying to assign a queue to be out of band, but it has been submitted to before. This may not work as intended.\n");
+
+            /* Migrate the command queue to the out of band queue, so that it cannot conflict
+             * with other queues from scheduling PoV.
+             * The assumption is that NvAPI notifies before the queue has actually been used
+             * for anything meaningful. */
+            d3d12_device_unmap_vkd3d_queue(command_queue->vkd3d_queue, command_queue);
+            pthread_mutex_lock(&out_of_band_queue->command_queue_mutex);
+            {
+                out_of_band_queue->virtual_queue_count++;
+                vkd3d_array_reserve(
+                        (void**)&out_of_band_queue->command_queues, &out_of_band_queue->command_queue_size,
+                        out_of_band_queue->command_queue_count + 1,
+                        sizeof(*out_of_band_queue->command_queues));
+                out_of_band_queue->command_queues[out_of_band_queue->command_queue_count++] = command_queue;
+            }
+            pthread_mutex_unlock(&out_of_band_queue->command_queue_mutex);
+
             vkd3d_set_queue_out_of_band(command_queue->device, out_of_band_queue, vk_queue_type);
             command_queue->vkd3d_queue = out_of_band_queue;
+            command_queue->out_of_band_queue_type = vk_queue_type;
             break;
         }
     }

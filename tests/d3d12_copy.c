@@ -646,6 +646,277 @@ void test_copy_texture_buffer(void)
     destroy_test_context(&context);
 }
 
+void test_copy_texture_buffer_d24(void)
+{
+    D3D12_TEXTURE_COPY_LOCATION copy_dst, copy_src;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc;
+    D3D12_RESOURCE_DESC buffer_desc, ds_desc;
+    D3D12_HEAP_PROPERTIES heap_properties;
+    D3D12_ROOT_SIGNATURE_DESC root_desc;
+    D3D12_ROOT_PARAMETER root_args[2];
+    D3D12_DESCRIPTOR_RANGE srv_range;
+    struct depth_stencil_resource ds;
+    ID3D12DescriptorHeap *gpu_heap;
+    struct test_context_desc desc;
+    struct test_context context;
+    ID3D12Resource *buffer;
+    UINT64 copyable_size;
+    D3D12_BOX copy_box;
+    unsigned int x, y;
+    void *map_ptr;
+    HRESULT hr;
+
+    static const struct
+    {
+        uint32_t bit_pattern;
+        float value;
+    }
+    tests[] =
+    {
+        { 0, 0.0f },
+        { 0x111111u, 1.0f / 15.0f },
+        { 0x222222u, 2.0f / 15.0f },
+        { 0x333333u, 3.0f / 15.0f },
+        { 0x444444u, 4.0f / 15.0f },
+        { 0x555555u, 5.0f / 15.0f },
+
+        { 0x666666u, 6.0f / 15.0f },
+        { 0x777777u, 7.0f / 15.0f },
+        { 0x888888u, 8.0f / 15.0f },
+        { 0x999999u, 9.0f / 15.0f },
+        { 0xaaaaaau, 10.0f / 15.0f },
+        { 0xbbbbbbu, 11.0f / 15.0f },
+
+        { 0xccccccu, 12.0f / 15.0f },
+        { 0xddddddu, 13.0f / 15.0f },
+        { 0xeeeeeeu, 14.0f / 15.0f },
+        { 0xffffffu, 1.0f },
+        { 0xffffffffu, 1.0f },
+        { 0xff800000u, 0.5f },
+    };
+
+    static const size_t test_w = 6;
+    static const size_t test_h = 3;
+
+#include "shaders/copy/headers/cs_interpret_d24.h"
+
+    memset(&desc, 0, sizeof(desc));
+    desc.no_pipeline = true;
+    desc.no_root_signature = true;
+    desc.no_render_target = true;
+
+    if (!init_test_context(&context, &desc))
+        return;
+
+    gpu_heap = create_gpu_descriptor_heap(context.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1);
+
+    init_depth_stencil(&ds, context.device, 8, 8, 1, 1,
+            DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_D24_UNORM_S8_UINT, NULL);
+    ds_desc = ID3D12Resource_GetDesc(ds.texture);
+
+    ID3D12Device_GetCopyableFootprints(context.device, &ds_desc, 0, 1, 0,
+            &footprint, NULL, NULL, &copyable_size);
+
+    memset(&srv_desc, 0, sizeof(srv_desc));
+    srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv_desc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    srv_desc.Texture2D.MipLevels = 1;
+    srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+    ID3D12Device_CreateShaderResourceView(context.device, ds.texture,
+            &srv_desc, get_cpu_descriptor_handle(&context, gpu_heap, 0));
+
+    memset(&srv_range, 0, sizeof(srv_range));
+    srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srv_range.NumDescriptors = 1;
+
+    memset(root_args, 0, sizeof(root_args));
+    root_args[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    root_args[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    root_args[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    root_args[1].DescriptorTable.NumDescriptorRanges = 1;
+    root_args[1].DescriptorTable.pDescriptorRanges = &srv_range;
+    root_args[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    memset(&root_desc, 0, sizeof(root_desc));
+    root_desc.NumParameters = ARRAY_SIZE(root_args);
+    root_desc.pParameters = root_args;
+
+    hr = create_root_signature(context.device, &root_desc, &context.root_signature);
+    ok(hr == S_OK, "Failed to create root signature, hr %#x.\n", (int)hr);
+
+    context.pipeline_state = create_compute_pipeline_state(context.device, context.root_signature, cs_interpret_d24_dxbc);
+
+    memset(&heap_properties, 0, sizeof(heap_properties));
+    heap_properties.Type = D3D12_HEAP_TYPE_CUSTOM;
+    heap_properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
+    heap_properties.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+
+    memset(&buffer_desc, 0, sizeof(buffer_desc));
+    buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_desc.Width = 4096 + copyable_size;
+    buffer_desc.Height = 1u;
+    buffer_desc.DepthOrArraySize = 1u;
+    buffer_desc.MipLevels = 1u;
+    buffer_desc.SampleDesc.Count = 1u;
+    buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    buffer_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    hr = ID3D12Device_CreateCommittedResource(context.device, &heap_properties, D3D12_HEAP_FLAG_NONE,
+            &buffer_desc, D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource, (void **)&buffer);
+    ok(hr == S_OK, "Failed to create buffer, hr %#x.\n", (int)hr);
+
+    /* Upload test rect to coordinate (1,2) with arbitrary offset */
+    memset(&copy_dst, 0, sizeof(copy_dst));
+    copy_dst.pResource = ds.texture;
+    copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    copy_dst.SubresourceIndex = 0;
+
+    memset(&copy_src, 0, sizeof(copy_src));
+    copy_src.pResource = buffer;
+    copy_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    copy_src.PlacedFootprint = footprint;
+    copy_src.PlacedFootprint.Offset = 1024;
+
+    memset(&copy_box, 0, sizeof(copy_box));
+    copy_box.right = test_w;
+    copy_box.bottom = test_h;
+    copy_box.back = 1;
+
+    hr = ID3D12Resource_Map(buffer, 0, NULL, &map_ptr);
+    ok(hr == S_OK, "Failed to map buffer, hr %#x.\n", (int)hr);
+
+    for (y = 0; y < test_h; y++)
+    {
+        for (x = 0; x < test_w; x++)
+        {
+            uint32_t offset = copy_src.PlacedFootprint.Offset +
+                    y * copy_src.PlacedFootprint.Footprint.RowPitch +
+                    x * sizeof(uint32_t);
+            memcpy((char*)map_ptr + offset, &tests[test_w * y + x].bit_pattern, sizeof(uint32_t));
+        }
+    }
+
+    ID3D12Resource_Unmap(buffer, 0, NULL);
+
+    /* Clear to arbitrary value and copy bit patterns to depth aspect */
+    ID3D12GraphicsCommandList_ClearDepthStencilView(context.list, ds.dsv_handle,
+            D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 0.1f, 0, 0, NULL);
+
+    transition_resource_state(context.list, buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    transition_resource_state(context.list, ds.texture, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    ID3D12GraphicsCommandList_CopyTextureRegion(context.list, &copy_dst, 1, 2, 0, &copy_src, &copy_box);
+
+    transition_resource_state(context.list, buffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    transition_resource_state(context.list, ds.texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+
+    /* Dispatch shader to read depth texture and compare float values */
+    ID3D12GraphicsCommandList_SetDescriptorHeaps(context.list, 1, &gpu_heap);
+    ID3D12GraphicsCommandList_SetComputeRootSignature(context.list, context.root_signature);
+    ID3D12GraphicsCommandList_SetPipelineState(context.list, context.pipeline_state);
+    ID3D12GraphicsCommandList_SetComputeRootUnorderedAccessView(context.list, 0, ID3D12Resource_GetGPUVirtualAddress(buffer));
+    ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(context.list, 1, get_gpu_descriptor_handle(&context, gpu_heap, 0));
+    ID3D12GraphicsCommandList_Dispatch(context.list, 1, 1, 1);
+
+    transition_resource_state(context.list, buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+
+    hr = ID3D12GraphicsCommandList_Close(context.list);
+    ok(hr == S_OK, "Failed to close command list, hr %#x.\n", (int)hr);
+
+    exec_command_list(context.queue, context.list);
+    wait_queue_idle(context.device, context.queue);
+    reset_command_list(context.list, context.allocator);
+
+    hr = ID3D12Resource_Map(buffer, 0, NULL, &map_ptr);
+    ok(hr == S_OK, "Failed to map buffer, hr %#x.\n", (int)hr);
+
+    for (y = 0; y < 8; y++)
+    {
+        for (x = 0; x < 8; x++)
+        {
+            const float *src = (const float*)map_ptr + ds_desc.Width * y + x;
+            bool has_amd_bug = false;
+            float expected = 0.1f;
+
+            if (x >= 1 && y >= 2 && x < 1 + test_w && y < 2 + test_h)
+            {
+                uint32_t test_index = test_w * (y - 2) + (x - 1);
+                expected = tests[test_index].value;
+                has_amd_bug = tests[test_index].bit_pattern > 0xffffffu;
+            }
+
+            /* Native AMD does not mask the upper 8 bits when copying to D24.
+             * Mark as bug since the resulting depth values are outside of the
+             * representable range. */
+            bug_if(has_amd_bug && *src > 1.0f && is_amd_windows_device(context.device))
+            ok(fabs(*src - expected) < 0.001f, "Got %f, expected %f at (%u,%u).\n", *src, expected, x, y);
+        }
+    }
+
+    memset(map_ptr, 0xae, buffer_desc.Width);
+    ID3D12Resource_Unmap(buffer, 0, NULL);
+
+    /* Copy depth texture back to buffer and compare bit patterns */
+    transition_resource_state(context.list, buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    copy_src.PlacedFootprint.Offset = 4096;
+
+    memset(&copy_box, 0, sizeof(copy_box));
+    copy_box.left = 1;
+    copy_box.top = 2;
+    copy_box.front = 0;
+    copy_box.right = 1 + test_w;
+    copy_box.bottom = 2 + test_h;
+    copy_box.back = 1;
+
+    ID3D12GraphicsCommandList_CopyTextureRegion(context.list, &copy_src, 0, 0, 0, &copy_dst, &copy_box);
+
+    transition_resource_state(context.list, buffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+
+    hr = ID3D12GraphicsCommandList_Close(context.list);
+    ok(hr == S_OK, "Failed to close command list, hr %#x.\n", (int)hr);
+
+    exec_command_list(context.queue, context.list);
+    wait_queue_idle(context.device, context.queue);
+    reset_command_list(context.list, context.allocator);
+
+    hr = ID3D12Resource_Map(buffer, 0, NULL, &map_ptr);
+    ok(hr == S_OK, "Failed to map buffer, hr %#x.\n", (int)hr);
+
+    for (y = 0; y < test_h; y++)
+    {
+        for (x = 0; x < test_w; x++)
+        {
+            uint32_t offset = copy_src.PlacedFootprint.Offset +
+                    y * copy_src.PlacedFootprint.Footprint.RowPitch +
+                    x * sizeof(uint32_t);
+            uint32_t expected = tests[test_w * y + x].bit_pattern;
+            bool has_amd_bug = expected > 0xffffffu;
+            uint32_t got;
+
+            memcpy(&got, (char*)map_ptr + offset, sizeof(got));
+            expected &= 0xffffffu;
+
+            /* Nvidia somehow preserves the upper 8 bits of the destination
+             * dwords on Vulkan, which does not happen on native */
+            todo_if(got >> 24u == 0xae)
+            bug_if(has_amd_bug && is_amd_windows_device(context.device))
+            ok(max(got, expected) - min(got, expected) <= 1,
+                "Got %#x, expected %#x at (%u,%u).\n", got, expected, x, y);
+        }
+    }
+
+    ID3D12Resource_Unmap(buffer, 0, NULL);
+    ID3D12Resource_Release(buffer);
+    ID3D12DescriptorHeap_Release(gpu_heap);
+
+    destroy_depth_stencil(&ds);
+    destroy_test_context(&context);
+}
+
 void test_copy_texture_bc_rgba(void)
 {
     D3D12_TEXTURE_COPY_LOCATION bc_region, rgba_region;
@@ -954,6 +1225,94 @@ void test_copy_texture_bc_rgba(void)
     ID3D12Resource_Release(rgba_texture);
     ID3D12Resource_Release(bc_texture);
 
+    destroy_test_context(&context);
+}
+
+void test_copy_buffer_texture_bc_rgba(void)
+{
+    D3D12_TEXTURE_COPY_LOCATION dst_location, src_location;
+    ID3D12Resource *bc_texture, *upload_buffer;
+    struct test_context_desc desc;
+    struct resource_readback rb;
+    struct test_context context;
+    struct uvec4 *upload_row;
+    const struct uvec4 *got;
+    struct uvec4 expected;
+    uint8_t *upload_data;
+    unsigned int i, x, y;
+    HRESULT hr;
+
+    static const unsigned int probes[][2] =
+    {
+        { 0, 0 }, { 15, 0 }, { 16, 0 }, { 0, 15 }, { 0, 16 }, { 63, 63 },
+    };
+
+    memset(&desc, 0, sizeof(desc));
+    desc.no_pipeline = true;
+    desc.no_root_signature = true;
+    desc.no_render_target = true;
+    if (!init_test_context(&context, &desc))
+        return;
+
+    /* Each RGBA32_UINT texel is physically one BC3 block. Keep the source
+     * dimensions large enough that an unconverted Vulkan copy remains valid,
+     * but covers only the upper-left portion of the destination. */
+    upload_buffer = create_upload_buffer(context.device, 64 * 1024, NULL);
+    hr = ID3D12Resource_Map(upload_buffer, 0, NULL, (void **)&upload_data);
+    ok(hr == S_OK, "Failed to map upload buffer, hr %#x.\n", (int)hr);
+    for (y = 0; y < 64; ++y)
+    {
+        upload_row = (struct uvec4 *)(upload_data + y * 1024);
+        for (x = 0; x < 64; ++x)
+        {
+            upload_row[x].x = 0x10000000u | (y << 8) | x;
+            upload_row[x].y = 0x20000000u | (x << 8) | y;
+            upload_row[x].z = 0x30000000u | (y << 16) | x;
+            upload_row[x].w = 0x40000000u | (x << 16) | y;
+        }
+    }
+    ID3D12Resource_Unmap(upload_buffer, 0, NULL);
+
+    bc_texture = create_default_texture(context.device, 256, 256, DXGI_FORMAT_BC3_UNORM,
+            0, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    memset(&src_location, 0, sizeof(src_location));
+    src_location.pResource = upload_buffer;
+    src_location.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src_location.PlacedFootprint.Footprint.Width = 64;
+    src_location.PlacedFootprint.Footprint.Height = 64;
+    src_location.PlacedFootprint.Footprint.Depth = 1;
+    src_location.PlacedFootprint.Footprint.RowPitch = 1024;
+    src_location.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+
+    memset(&dst_location, 0, sizeof(dst_location));
+    dst_location.pResource = bc_texture;
+    dst_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    ID3D12GraphicsCommandList_CopyTextureRegion(context.list,
+            &dst_location, 0, 0, 0, &src_location, NULL);
+
+    transition_resource_state(context.list, bc_texture,
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+    get_texture_readback_with_command_list(bc_texture, 0, &rb, context.queue, context.list);
+    for (i = 0; i < ARRAY_SIZE(probes); ++i)
+    {
+        x = probes[i][0];
+        y = probes[i][1];
+        expected.x = 0x10000000u | (y << 8) | x;
+        expected.y = 0x20000000u | (x << 8) | y;
+        expected.z = 0x30000000u | (y << 16) | x;
+        expected.w = 0x40000000u | (x << 16) | y;
+        got = get_readback_uvec4(&rb, x, y);
+        ok(!memcmp(got, &expected, sizeof(*got)),
+                "Got {%#x, %#x, %#x, %#x} at (%u, %u), expected {%#x, %#x, %#x, %#x}.\n",
+                got->x, got->y, got->z, got->w, x, y,
+                expected.x, expected.y, expected.z, expected.w);
+    }
+    release_resource_readback(&rb);
+
+    ID3D12Resource_Release(upload_buffer);
+    ID3D12Resource_Release(bc_texture);
     destroy_test_context(&context);
 }
 
@@ -4125,7 +4484,11 @@ static void test_queue_depth_stencil_inner(D3D12_COMMAND_LIST_TYPE type, bool ms
     }
 
     ID3D12GraphicsCommandList_Reset(context.copy_list, context.copy_allocator, NULL);
+    if (type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+        vkd3d_mute_validation_message("12449", "Vulkan now bans MSAA depth copies on anything outside graphics queue.");
     ID3D12GraphicsCommandList_CopyResource(context.copy_list, copy_tex, tex);
+    if (type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+        vkd3d_unmute_validation_message("12449");
     transition_resource_state(context.copy_list, copy_tex, D3D12_RESOURCE_STATE_COPY_DEST,
         type == D3D12_COMMAND_LIST_TYPE_COPY ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_COPY_SOURCE);
 
@@ -4172,8 +4535,13 @@ out:
     else
         set_box(&box, 0, 0, 0, 4, 4, 1);
 
+    if (type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+        vkd3d_mute_validation_message("12449", "Vulkan now bans MSAA depth copies on anything outside graphics queue.");
     ID3D12GraphicsCommandList_CopyTextureRegion(context.copy_list, &dst, 1, 1, 0, &src, &box);
     ID3D12GraphicsCommandList_Close(context.copy_list);
+    /* Close can flush copy batches. */
+    if (type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+        vkd3d_unmute_validation_message("12449");
     exec_command_list(context.copy_queue, context.copy_list);
     ID3D12CommandQueue_Signal(context.copy_queue, fence, 2);
     ID3D12CommandQueue_Wait(context.context.queue, fence, 2);
@@ -4252,4 +4620,99 @@ void test_graphics_queue_depth_stencil(void)
 void test_graphics_queue_depth_stencil_msaa(void)
 {
     test_queue_depth_stencil_inner(D3D12_COMMAND_LIST_TYPE_DIRECT, true);
+}
+
+/* Simulate a certain ridiculous code pattern from Farming Simulator 25. */
+void test_copy_block_spam(void)
+{
+    struct test_context_desc context_desc;
+    D3D12_QUERY_HEAP_DESC query_heap_desc;
+    ID3D12Resource *query_output;
+    struct resource_readback rb;
+    ID3D12QueryHeap *query_heap;
+    struct test_context context;
+    ID3D12Resource *staging;
+    ID3D12Resource *output;
+    uint16_t *map_ptr;
+    unsigned int x, y;
+
+    memset(&context_desc, 0, sizeof(context_desc));
+    context_desc.no_pipeline = true;
+    context_desc.no_render_target = true;
+    context_desc.no_root_signature = true;
+    if (!init_test_context(&context, &context_desc))
+        return;
+
+    staging = create_upload_buffer(context.device, 16 * 1024, NULL);
+    output = create_default_texture2d(context.device, 8192, 8192, 1, 1, DXGI_FORMAT_R16_UINT,
+                                      D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    query_output = create_default_buffer(context.device, 16, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON);
+
+    ID3D12Resource_Map(staging, 0, NULL, (void **)&map_ptr);
+    for (x = 0; x < 8 * 1024; x++)
+        map_ptr[x] = x;
+    ID3D12Resource_Unmap(staging, 0, NULL);
+
+    memset(&query_heap_desc, 0, sizeof(query_heap_desc));
+    query_heap_desc.Count = 2;
+    query_heap_desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    ID3D12Device_CreateQueryHeap(context.device, &query_heap_desc, &IID_ID3D12QueryHeap, (void **)&query_heap);
+
+    ID3D12GraphicsCommandList_EndQuery(context.list, query_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+
+    for (y = 0; y < 8192; y += 16)
+    {
+        for (x = 0; x < 8192; x += 16)
+        {
+            D3D12_TEXTURE_COPY_LOCATION dst, src;
+            memset(&dst, 0, sizeof(dst));
+            memset(&src, 0, sizeof(src));
+
+            dst.pResource = output;
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+
+            src.pResource = staging;
+            src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint.Footprint.Width = 16;
+            src.PlacedFootprint.Footprint.Height = 16;
+            src.PlacedFootprint.Footprint.Depth = 1;
+            src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R16_UINT;
+            src.PlacedFootprint.Footprint.RowPitch = 256;
+            src.PlacedFootprint.Offset = ((x ^ y) & 7) * 512;
+
+            /* As a cherry on top, there's ping-pong barriers between every 16x16 block ... */
+            transition_resource_state(context.list, output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                      D3D12_RESOURCE_STATE_COPY_DEST);
+
+            ID3D12GraphicsCommandList_CopyTextureRegion(context.list, &dst, x, y, 0, &src, NULL);
+
+            transition_resource_state(context.list, output, D3D12_RESOURCE_STATE_COPY_DEST,
+                                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
+    }
+
+    ID3D12GraphicsCommandList_EndQuery(context.list, query_heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+    ID3D12GraphicsCommandList_ResolveQueryData(context.list, query_heap, D3D12_QUERY_TYPE_TIMESTAMP,
+                                               0, 2, query_output, 0);
+    transition_resource_state(context.list, query_output, D3D12_RESOURCE_STATE_COPY_DEST,
+                              D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+    get_buffer_readback_with_command_list(query_output, DXGI_FORMAT_UNKNOWN, &rb, context.queue, context.list);
+    {
+        UINT64 start_ticks = get_readback_uint64(&rb, 0, 0);
+        UINT64 end_ticks = get_readback_uint64(&rb, 1, 0);
+        UINT64 freq;
+        ok(SUCCEEDED(ID3D12CommandQueue_GetTimestampFrequency(context.queue, &freq)), "Failed to get timestamp freq.\n");
+        skip("Copy took %.3f ms\n", 1e3 * (double)(end_ticks - start_ticks) / (double)freq);
+    }
+    release_resource_readback(&rb);
+
+    ID3D12Resource_Release(output);
+    ID3D12Resource_Release(query_output);
+    ID3D12Resource_Release(staging);
+    ID3D12QueryHeap_Release(query_heap);
+    destroy_test_context(&context);
 }

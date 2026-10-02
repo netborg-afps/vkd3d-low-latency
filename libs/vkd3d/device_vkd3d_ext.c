@@ -1179,6 +1179,70 @@ CONST_VTBL struct ID3D12DXVKInteropDevice3Vtbl d3d12_dxvk_interop_device_vtbl =
     d3d12_dxvk_interop_device_GetVulkanHeapInfo,
 };
 
+void d3d12_device_notify_vk_swapchain_creation(struct d3d12_device *device, struct dxgi_vk_swap_chain *chain)
+{
+    if (!device->vk_info.NV_low_latency2)
+        return;
+
+    spinlock_acquire(&device->low_latency_swapchain_spinlock);
+
+    if (device->swapchain_info.low_latency_swapchain && device->swapchain_info.low_latency_swapchain != chain)
+    {
+        /* Hard evidence of multiple swapchains being in flight. */
+        dxgi_vk_swap_chain_set_latency_sleep_mode(chain, false, false, 0);
+        dxgi_vk_swap_chain_decref(device->swapchain_info.low_latency_swapchain);
+        WARN("Multiple swapchains are in-flight. LL2 will be disabled until the situation stabilizes.\n");
+        device->swapchain_info.low_latency_swapchain = NULL;
+    }
+
+    spinlock_release(&device->low_latency_swapchain_spinlock);
+}
+
+void d3d12_device_register_low_latency_swapchain(struct d3d12_device *device, struct dxgi_vk_swap_chain *chain)
+{
+    if (!device->vk_info.NV_low_latency2)
+        return;
+
+    spinlock_acquire(&device->low_latency_swapchain_spinlock);
+
+    device->swapchain_info.dxgi_swapchain_count++;
+
+    if (device->swapchain_info.dxgi_swapchain_count == 1 && !device->swapchain_info.low_latency_swapchain)
+    {
+        dxgi_vk_swap_chain_incref(chain);
+        device->swapchain_info.low_latency_swapchain = chain;
+        dxgi_vk_swap_chain_set_latency_sleep_mode(chain, device->swapchain_info.mode,
+                device->swapchain_info.boost, device->swapchain_info.minimum_us);
+    }
+
+    /* Defer the demotion of the existing low-latency swapchain.
+     * Supposedly, there are applications that create a second swapchain, but never actually present anything to it
+     * before destroying it.
+     * It will never create a Vulkan swapchain and will not conflict with LL2.
+     * We can defer the demotion until we have evidence later. */
+
+    spinlock_release(&device->low_latency_swapchain_spinlock);
+}
+
+void d3d12_device_remove_low_latency_swapchain(struct d3d12_device *device, struct dxgi_vk_swap_chain *chain)
+{
+    if (!device->vk_info.NV_low_latency2)
+        return;
+
+    spinlock_acquire(&device->low_latency_swapchain_spinlock);
+
+    assert(device->swapchain_info.dxgi_swapchain_count);
+    device->swapchain_info.dxgi_swapchain_count--;
+
+    if (device->swapchain_info.low_latency_swapchain == chain)
+    {
+        dxgi_vk_swap_chain_decref(chain);
+        device->swapchain_info.low_latency_swapchain = NULL;
+    }
+
+    spinlock_release(&device->low_latency_swapchain_spinlock);
+}
+
 static inline struct d3d12_device *d3d12_device_from_ID3DLowLatencyDevice(d3d_low_latency_device_iface *iface)
 {
     return CONTAINING_RECORD(iface, struct d3d12_device, ID3DLowLatencyDevice_iface);
@@ -1278,7 +1342,6 @@ static HRESULT STDMETHODCALLTYPE d3d12_low_latency_device_SetLatencyMarker(d3d_l
     // struct dxgi_vk_swap_chain *low_latency_swapchain;
     VkLatencyMarkerNV vk_marker;
     struct d3d12_device *device;
-    uint64_t internal_frame_id;
 
     device = d3d12_device_from_ID3DLowLatencyDevice(iface);
     vk_marker = (VkLatencyMarkerNV)markerType;
@@ -1293,45 +1356,50 @@ static HRESULT STDMETHODCALLTYPE d3d12_low_latency_device_SetLatencyMarker(d3d_l
         return S_OK;
     }
 
-    /* Skip ahead. If application does not set frame counter, we'll still internally increment over time to fill in the gap.
-     * If application starts to use the frame IDs appropriately again, we'll catch up almost instantly,
-     * where low_latency_frame_id should overtake internal present ID counter.
-     * Frame marker needs to be device level monotonic. */
-    internal_frame_id = frameID;
-
     switch (vk_marker)
     {
-        case VK_LATENCY_MARKER_RENDERSUBMIT_START_NV:
-            if (internal_frame_id < device->frame_markers.render)
-            {
-                WARN("RENDERSUBMIT_START_NV is non-monotonic %"PRIu64" < %"PRIu64".\n",
-                        internal_frame_id, device->frame_markers.render);
-            }
-            device->frame_markers.render = internal_frame_id;
+        case VK_LATENCY_MARKER_SIMULATION_START_NV:
+        {
+            struct vkd3d_device_frame_markers *markers = &device->frame_markers;
+            spinlock_acquire(&device->low_latency_swapchain_spinlock);
+            markers->recent_sim_starts[markers->recent_sim_starts_index] = frameID;
+            markers->recent_sim_starts_index = (markers->recent_sim_starts_index + 1) % VKD3D_RECENT_SIM_STARTS_COUNT;
+            spinlock_release(&device->low_latency_swapchain_spinlock);
+            break;
+        }
+        case VK_LATENCY_MARKER_PRESENT_END_NV:
+            spinlock_acquire(&device->low_latency_swapchain_spinlock);
+            device->frame_markers.present_end = frameID;
+            device->frame_markers.new_frame = true;
+            spinlock_release(&device->low_latency_swapchain_spinlock);
             break;
         case VK_LATENCY_MARKER_PRESENT_START_NV:
-            if (internal_frame_id < device->frame_markers.present)
+            if (frameID < device->frame_markers.present)
             {
                 WARN("PRESENT_START_NV is non-monotonic %"PRIu64" < %"PRIu64".\n",
-                        internal_frame_id, device->frame_markers.present);
+                        frameID, device->frame_markers.present);
             }
             vkd3d_atomic_uint64_store_explicit(
-                    &device->frame_markers.present, internal_frame_id, vkd3d_memory_order_release);
+                    &device->frame_markers.present, frameID, vkd3d_memory_order_release);
+            break;
+        case VK_LATENCY_MARKER_OUT_OF_BAND_RENDERSUBMIT_START_NV:
+            vkd3d_atomic_uint64_store_explicit(
+                    &device->frame_markers.out_of_band_render, frameID, vkd3d_memory_order_release);
             break;
         default:
             break;
     }
 
-    // spinlock_acquire(&device->low_latency_swapchain_spinlock);
-    // if ((low_latency_swapchain = device->swapchain_info.low_latency_swapchain))
-    //     dxgi_vk_swap_chain_incref(low_latency_swapchain);
-    // spinlock_release(&device->low_latency_swapchain_spinlock);
-    //
-    // if (low_latency_swapchain)
-    // {
-    //     dxgi_vk_swap_chain_set_latency_marker(low_latency_swapchain, internal_frame_id, vk_marker, true);
-    //     dxgi_vk_swap_chain_decref(low_latency_swapchain);
-    // }
+//    spinlock_acquire(&device->low_latency_swapchain_spinlock);
+//    if ((low_latency_swapchain = device->swapchain_info.low_latency_swapchain))
+//        dxgi_vk_swap_chain_incref(low_latency_swapchain);
+//    spinlock_release(&device->low_latency_swapchain_spinlock);
+//
+//    if (low_latency_swapchain)
+//    {
+//        dxgi_vk_swap_chain_set_latency_marker(low_latency_swapchain, frameID, vk_marker, true);
+//        dxgi_vk_swap_chain_decref(low_latency_swapchain);
+//    }
 
     return S_OK;
 }

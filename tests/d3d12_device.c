@@ -2579,6 +2579,11 @@ static void test_barrier_layout_feature_checks(ID3D12Device *device)
     static const D3D12_BARRIER_LAYOUT direct_queue_only_layouts[] =
     {
         D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON,
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ,
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE,
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST,
         D3D12_BARRIER_LAYOUT_RENDER_TARGET,
         D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ,
         D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
@@ -2741,18 +2746,18 @@ void test_misc_agility_sdk_feature_checks(void)
 
     hr = ID3D12Device_CheckFeatureSupport(device, D3D12_FEATURE_APPLICATION_SPECIFIC_DRIVER_STATE, &driver_state, sizeof(driver_state));
     /* Check that we recognize the query. Support doesn't matter. */
-    ok(SUCCEEDED(hr), "Got hr #%x\n", (unsigned int)hr);
+    ok(SUCCEEDED(hr), "Got hr #%x\n", (int)hr);
 
     hr = ID3D12Device_CheckFeatureSupport(device, D3D12_FEATURE_BYTECODE_BYPASS_HASH_SUPPORTED, &bytecode_bypass, sizeof(bytecode_bypass));
     /* Check that we recognize the query. Support doesn't matter. */
-    ok(SUCCEEDED(hr), "Got hr #%x\n", (unsigned int)hr);
+    ok(SUCCEEDED(hr), "Got hr #%x\n", (int)hr);
 
     /* Somewhat a special case, returns E_FAIL on failure. */
     hr = ID3D12Device_CheckFeatureSupport(device, D3D12_FEATURE_SHADER_CACHE_ABI_SUPPORT, &shadercache, sizeof(shadercache));
-    ok(hr == S_OK || hr == E_FAIL, "got hr #%x\n", hr);
+    ok(hr == S_OK || hr == E_FAIL, "got hr #%x\n", (int)hr);
 
     hr = ID3D12Device_CheckFeatureSupport(device, D3D12_FEATURE_D3D12_OPTIONS22, &options22, sizeof(options22));
-    ok(hr == S_OK, "Unexpected hr #%x\n", hr);
+    ok(hr == S_OK, "Unexpected hr #%x\n", (int)hr);
     ok(options22.Max1DDispatchSize >= 0xffff, "Unexpected dispatch size: %u\n", options22.Max1DDispatchSize);
 
     if (SUCCEEDED(ID3D12Device_CheckFeatureSupport(device, D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7))) &&

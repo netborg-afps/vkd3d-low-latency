@@ -171,6 +171,7 @@ HRESULT vkd3d_create_buffer(struct d3d12_device *device,
         const D3D12_RESOURCE_DESC1 *desc, const char *tag, VkBuffer *vk_buffer)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    VkBufferDeviceAddressAlignmentAllocateInfoVALVE alignment_info;
     VkExternalMemoryBufferCreateInfo external_info;
     const bool sparse_resource = !heap_properties;
     VkBufferCreateInfo buffer_info;
@@ -191,7 +192,7 @@ HRESULT vkd3d_create_buffer(struct d3d12_device *device,
         external_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
         external_info.pNext = NULL;
         external_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
-        buffer_info.pNext = &external_info;
+        vk_prepend_struct(&buffer_info, &external_info);
     }
 
     if (sparse_resource)
@@ -200,6 +201,14 @@ HRESULT vkd3d_create_buffer(struct d3d12_device *device,
                 VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT |
                 VK_BUFFER_CREATE_SPARSE_ALIASED_BIT;
         buffer_info.size = adjust_sparse_buffer_size(buffer_info.size);
+
+        if (device->device_info.buffer_device_address_allocation_alignment_features.bufferDeviceAddressAllocationAlignment)
+        {
+            alignment_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_ALIGNMENT_ALLOCATE_INFO_VALVE;
+            alignment_info.pNext = NULL;
+            alignment_info.alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+            vk_prepend_struct(&buffer_info, &alignment_info);
+        }
     }
 
     buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT
@@ -628,6 +637,12 @@ static bool vkd3d_format_needs_extended_usage(const struct vkd3d_format *format,
     return (supported_flags & required_flags) != required_flags;
 }
 
+static bool vkd3d_format_needs_compute_copies(const struct vkd3d_format *format)
+{
+    /* Enable compute shader path for D24 copies that require data conversion */
+    return (format->vk_aspect_mask & VK_IMAGE_ASPECT_DEPTH_BIT) && format->is_emulated;
+}
+
 struct vkd3d_image_create_info
 {
     struct vkd3d_format_compatibility_list format_compat_list;
@@ -931,8 +946,23 @@ static HRESULT vkd3d_get_image_create_info(struct d3d12_device *device,
     }
 
     image_info->usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
     if (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
+    {
         image_info->usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+        /* RDNA2 should be fine with GENERAL layout for non-MSAA.
+         * Feedback loop with MSAA images is not a thing we need to ponder. */
+        if (desc->SampleDesc.Count == 1 &&
+            device->device_info.maintenance_10_features.maintenance10 &&
+            device->device_info.dynamic_rendering_local_read_features.dynamicRenderingLocalRead &&
+            VKD3D_CONFIG_FLAG_IS_SET(REQUIRE_INPUT_ATTACHMENTS))
+        {
+            /* For workaround purposes, we may need to trick drivers into giving us a feedback loop path. */
+            image_info->usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+        }
+    }
+
     if (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
         image_info->usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     if (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
@@ -1007,14 +1037,14 @@ static HRESULT vkd3d_get_image_create_info(struct d3d12_device *device,
         {
             image_info->queueFamilyIndexCount = device->concurrent_queue_family_buffer_count;
             image_info->pQueueFamilyIndices = device->concurrent_queue_family_indices_buffer;
-            if (resource)
+            if (resource && !vkd3d_format_needs_compute_copies(format))
                 resource->flags |= VKD3D_RESOURCE_COPY_QUEUE_COMPATIBLE;
         }
         else
         {
             image_info->queueFamilyIndexCount = device->concurrent_queue_family_image_count;
             image_info->pQueueFamilyIndices = device->concurrent_queue_family_indices_image;
-            if (resource && device->concurrent_transfer_queue)
+            if (resource && device->concurrent_transfer_queue && !vkd3d_format_needs_compute_copies(format))
                 resource->flags |= VKD3D_RESOURCE_COPY_QUEUE_COMPATIBLE;
         }
     }
@@ -1024,7 +1054,7 @@ static HRESULT vkd3d_get_image_create_info(struct d3d12_device *device,
         image_info->queueFamilyIndexCount = 0;
         image_info->pQueueFamilyIndices = NULL;
 
-        if (resource)
+        if (resource && !vkd3d_format_needs_compute_copies(format))
             resource->flags |= VKD3D_RESOURCE_COPY_QUEUE_COMPATIBLE;
     }
 
@@ -1095,10 +1125,14 @@ static HRESULT vkd3d_get_image_create_info(struct d3d12_device *device,
     if (resource)
     {
         /* Cases where we need to force images into GENERAL layout at all times.
-         * Read/WriteFromSubresource essentialy require simultaneous access. */
+         * Read/WriteFromSubresource essentially requires simultaneous access.
+         * Force GENERAL layout if we allow input attachments.
+         * This simplifies a lot of things and avoids us being forced to do layout transitions
+         * in render passes on top. */
         if (d3d12_device_supports_unified_layouts(device) ||
                 (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) ||
                 (image_info->tiling == VK_IMAGE_TILING_LINEAR) ||
+                (image_info->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) ||
                 (heap_properties && is_cpu_accessible_heap(heap_properties)))
         {
             resource->flags |= VKD3D_RESOURCE_GENERAL_LAYOUT;
@@ -1108,6 +1142,9 @@ static HRESULT vkd3d_get_image_create_info(struct d3d12_device *device,
         {
             resource->common_layout = vk_common_image_layout_from_d3d12_desc(device, desc);
         }
+
+        if (image_info->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)
+            resource->flags |= VKD3D_RESOURCE_INPUT_ATTACHMENT;
     }
 
     if (device->device_info.image_alignment_control_features.imageAlignmentControl &&
@@ -1121,7 +1158,7 @@ static HRESULT vkd3d_get_image_create_info(struct d3d12_device *device,
         if ((desc->Flags & D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT) && d3d12_resource_supports_small_resource_alignment(desc, format))
             candidate_alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
 
-        if (desc->Alignment)
+        if (desc->Alignment && !(desc->Flags & D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT))
             candidate_alignment = desc->Alignment;
 
         if (VKD3D_CONFIG_FLAG_IS_SET(PLACED_TEXTURE_ALIASING) &&
@@ -1271,7 +1308,10 @@ HRESULT vkd3d_get_image_allocation_info(struct d3d12_device *device,
     /* Do not report alignments greater than DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT
      * since that might confuse apps. Instead, pad the allocation so that we can
      * align the image ourselves. */
-    target_alignment = desc->Alignment ? desc->Alignment : d3d12_resource_desc_default_alignment(desc);
+    target_alignment = d3d12_resource_desc_default_alignment(desc);
+
+    if (desc->Alignment && !(desc->Flags & D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT))
+        target_alignment = desc->Alignment;
 
     /* Tight alignment enforces small alignment for eligible resources */
     if ((desc->Flags & D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT) &&
@@ -2290,9 +2330,7 @@ static void d3d12_device_add_queue_timeline_deferred_decref(struct d3d12_device 
         {
             vk_queue = queue_family->queues[i];
 
-            pthread_mutex_lock(&vk_queue->fence_mutex);
-            last_observed = vk_queue->cpu_observed_timeline_value;
-            pthread_mutex_unlock(&vk_queue->fence_mutex);
+            last_observed = vkd3d_atomic_uint64_load_explicit(&vk_queue->cpu_observed_timeline_value, vkd3d_memory_order_acquire);
 
             pthread_mutex_lock(&vk_queue->command_queue_mutex);
             for (j = 0; j < vk_queue->command_queue_count; j++)
@@ -2307,6 +2345,7 @@ static void d3d12_device_add_queue_timeline_deferred_decref(struct d3d12_device 
 
                 /* Most queues will likely be idle. In this case it's pointless to queue up a waiter. */
                 pthread_mutex_lock(&queue->queue_lock);
+
                 if (idle_queue)
                     idle_queue = queue->last_submission_timeline_value <= last_observed;
 
@@ -2635,7 +2674,7 @@ static D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE d3d12_resource_GetGPUVirtualA
 {
     struct d3d12_resource *resource = impl_from_ID3D12Resource2(iface);
 
-    TRACE("iface %p.\n", iface);
+    TRACE("iface %p, va #%"PRIx64"\n", iface, resource->res.va);
 
     return resource->res.va;
 }
@@ -3048,31 +3087,71 @@ static bool d3d12_resource_supports_small_resource_alignment(const D3D12_RESOURC
     return estimated_size <= D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
 }
 
+static bool d3d12_resource_validate_buffer_alignment(const D3D12_RESOURCE_DESC1 *desc)
+{
+    if (!desc->Alignment)
+        return true;
+
+    if (desc->Flags & D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT)
+    {
+        /* Any power-of-two alignment between 8 and 256 is allowed here */
+        if ((desc->Alignment & (desc->Alignment - 1u)) || desc->Alignment < 8u || desc->Alignment > 256u)
+        {
+            WARN("Invalid tight alignment %"PRIu64" for buffer resource.\n", desc->Alignment);
+            return false;
+        }
+    }
+    else if (desc->Alignment != 0 && desc->Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
+    {
+        WARN("Invalid alignment %"PRIu64" for buffer resource.\n", desc->Alignment);
+        return false;
+    }
+
+    return true;
+}
+
 static bool d3d12_resource_validate_texture_alignment(const D3D12_RESOURCE_DESC1 *desc,
         const struct vkd3d_format *format)
 {
     if (!desc->Alignment)
         return true;
 
-    if (desc->Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT
-            && desc->Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT
-            && (desc->SampleDesc.Count == 1 || desc->Alignment != D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT))
+    if (desc->Flags & D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT)
     {
-        WARN("Invalid resource alignment %#"PRIx64".\n", desc->Alignment);
-        return false;
-    }
+        UINT64 max_alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
 
-    if ((desc->Alignment < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) &&
-            !d3d12_resource_supports_small_resource_alignment(desc, format))
+        if (d3d12_resource_supports_small_resource_alignment(desc, format) && desc->SampleDesc.Count == 1)
+            max_alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+        else if (desc->SampleDesc.Count > 1)
+            max_alignment = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
+
+        if ((desc->Alignment & (desc->Alignment - 1u)) || desc->Alignment < 8u || desc->Alignment > max_alignment)
+        {
+            WARN("Invalid tight resource alignment %#"PRIx64".\n", desc->Alignment);
+            return false;
+        }
+    }
+    else
     {
-        WARN("Invalid resource alignment %#"PRIx64" (required %#x).\n",
-                desc->Alignment, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
-        return false;
+        if (desc->Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT &&
+            desc->Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT &&
+            (desc->SampleDesc.Count == 1 || desc->Alignment != D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT))
+        {
+            WARN("Invalid resource alignment %#"PRIx64".\n", desc->Alignment);
+            return false;
+        }
+
+        if ((desc->Alignment < D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) &&
+                !d3d12_resource_supports_small_resource_alignment(desc, format))
+        {
+            WARN("Invalid resource alignment %#"PRIx64" (required %#x).\n",
+                    desc->Alignment, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
+            return false;
+        }
     }
 
     /* The size check for MSAA textures with D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT is probably
      * not important. The 4MB requirement is no longer universal and Vulkan has no such requirement. */
-
     return true;
 }
 
@@ -3114,12 +3193,6 @@ static HRESULT d3d12_resource_validate_usage(const D3D12_RESOURCE_DESC1 *desc,
         required_image_flags |= VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
     if (!(desc->Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) || desc->SampleDesc.Count > 1)
         required_image_flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-
-    if ((desc->Flags & D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT) && desc->Alignment)
-    {
-        WARN("Tight alignment and explicit alignment set simultaneously.\n");
-        return E_INVALIDARG;
-    }
 
     if (desc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
     {
@@ -3271,12 +3344,8 @@ HRESULT d3d12_resource_validate_desc(const D3D12_RESOURCE_DESC1 *desc,
                 return E_INVALIDARG;
             }
 
-            if (desc->Alignment != 0 && desc->Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
-            {
-                WARN("Invalid alignment %"PRIu64" for buffer resource. Must be 0 or D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT.\n",
-                        desc->Alignment);
+            if (!d3d12_resource_validate_buffer_alignment(desc))
                 return E_INVALIDARG;
-            }
 
             if (desc->Format != DXGI_FORMAT_UNKNOWN || desc->Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR
                     || desc->Height != 1 || desc->DepthOrArraySize != 1
@@ -4111,9 +4180,7 @@ static UINT64 d3d12_resource_determine_alignment(struct d3d12_device *device, co
     D3D12_RESOURCE_ALLOCATION_INFO allocation_info;
     HRESULT hr;
 
-    if (desc->Alignment)
-        return desc->Alignment;
-
+    /* The explicit alignment is ignored entirely here */
     if (desc->Flags & D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT)
     {
         if (desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
@@ -4124,6 +4191,9 @@ static UINT64 d3d12_resource_determine_alignment(struct d3d12_device *device, co
         else
             ERR("Failed to query image alignment, hr %#x.\n", (int)hr);
     }
+
+    if (desc->Alignment)
+        return desc->Alignment;
 
     if (desc->Layout == D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE ||
             desc->Layout == D3D12_TEXTURE_LAYOUT_64KB_STANDARD_SWIZZLE)
@@ -4180,6 +4250,11 @@ static HRESULT d3d12_resource_create(struct d3d12_device *device, uint32_t flags
     object->flags = flags;
     object->format = vkd3d_format_from_d3d12_resource_desc(device, desc, 0);
     object->res.cookie = vkd3d_allocate_cookie();
+
+    /* Tight alignment requires placed resource offsets to be aligned
+     * to the explicit alignment, but does not alter the description */
+    object->placed_alignment = max(desc->Alignment, object->desc.Alignment);
+
     spinlock_init(&object->priority.spinlock);
     object->priority.allows_dynamic_residency = false;
     object->priority.d3d12priority = D3D12_RESIDENCY_PRIORITY_NORMAL;
@@ -4420,8 +4495,7 @@ HRESULT d3d12_resource_create_committed(struct d3d12_device *device, const D3D12
         }
         else
         {
-            if (!device->device_info.zero_initialize_device_memory_features.zeroInitializeDeviceMemory ||
-                !device->device_info.pageable_device_memory_features.pageableDeviceLocalMemory)
+            if (d3d12_device_allow_committed_texture_suballocation(device))
             {
                 /* We want to allow suballocations and we need the allocation to
                  * be cleared to zero, which only works if we allow buffers */
@@ -4618,6 +4692,14 @@ HRESULT d3d12_resource_create_placed(struct d3d12_device *device, const D3D12_RE
     {
         WARN("Resource alignment is %"PRIu64", but heap alignment is %"PRIu64". This is not allowed.\n",
                 object->desc.Alignment, heap->desc.Alignment);
+        hr = E_INVALIDARG;
+        goto fail;
+    }
+
+    if (heap_offset & (object->placed_alignment - 1u))
+    {
+        WARN("Heap offset %#"PRIx64" not a multiple of resource alignment %#"PRIx64".\n",
+                heap_offset, object->placed_alignment);
         hr = E_INVALIDARG;
         goto fail;
     }
@@ -5383,7 +5465,7 @@ static void vkd3d_get_metadata_buffer_view_for_resource_legacy(struct d3d12_devi
     view->flags = VKD3D_DESCRIPTOR_FLAG_BUFFER_VA_RANGE | VKD3D_DESCRIPTOR_FLAG_NON_NULL;
 
     /* If we would need an SSBO offset buffer for whatever reason, just fallback to a typed view instead. */
-    if (view_format == DXGI_FORMAT_UNKNOWN)
+    if (view_format == DXGI_FORMAT_UNKNOWN && (view->va & 3) == 0)
         if (view->va & (device->device_info.properties2.properties.limits.minStorageBufferOffsetAlignment - 1))
             view->dxgi_format = DXGI_FORMAT_R32_UINT;
 }
@@ -8784,6 +8866,12 @@ void d3d12_rtv_desc_create_rtv(struct d3d12_rtv_desc *rtv_desc, struct d3d12_dev
 
     key.view_type = VKD3D_VIEW_TYPE_IMAGE;
     key.u.texture.image_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+    if (resource->flags & VKD3D_RESOURCE_INPUT_ATTACHMENT)
+    {
+        /* For workaround purposes, we may need to trick drivers into giving us a feedback loop path. */
+        key.u.texture.image_usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+    }
 
     if (desc)
     {

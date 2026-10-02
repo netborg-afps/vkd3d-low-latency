@@ -402,7 +402,7 @@ static void dxgi_vk_swap_chain_wait_acquire_semaphore(struct dxgi_vk_swap_chain 
     if (vr < 0)
     {
         ERR("Failed to submit, vr %d\n", vr);
-        VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST);
+        VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST, vr);
     }
     vkd3d_queue_release(chain->queue->vkd3d_queue);
 
@@ -627,7 +627,7 @@ static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_AddRef(IDXGIVkSwapChain2 *ifac
     {
         dxgi_vk_swap_chain_incref(chain);
         ID3D12CommandQueue_AddRef(&chain->queue->ID3D12CommandQueue_iface);
-        d3d12_device_register_swapchain(chain->queue->device, chain);
+        d3d12_device_register_low_latency_swapchain(chain->queue->device, chain);
     }
 
     return refcount;
@@ -648,10 +648,7 @@ static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_Release(IDXGIVkSwapChain2 *ifa
         /* Calling this from the submission thread will result in a deadlock, so
          * drain the swapchain queue now. */
         dxgi_vk_swap_chain_drain_queue(chain);
-
-        if (device->vk_info.NV_low_latency2)
-            d3d12_device_remove_swapchain(device, chain);
-
+        d3d12_device_remove_low_latency_swapchain(device, chain);
         dxgi_vk_swap_chain_decref(chain);
         ID3D12CommandQueue_Release(&queue->ID3D12CommandQueue_iface);
     }
@@ -1725,13 +1722,7 @@ static void dxgi_vk_swap_chain_destroy_swapchain_in_present_task(struct dxgi_vk_
     chain->present.current_backbuffer_index = UINT32_MAX;
 
     if (chain->queue->device->vk_info.NV_low_latency2)
-    {
-        spinlock_acquire(&chain->queue->device->low_latency_swapchain_spinlock);
-        chain->queue->device->swapchain_info.vk_swapchain_count--;
-        spinlock_release(&chain->queue->device->low_latency_swapchain_spinlock);
-
         pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
-    }
 }
 
 static VkColorSpaceKHR convert_color_space(DXGI_COLOR_SPACE_TYPE dxgi_color_space)
@@ -2111,6 +2102,10 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
     if (chain->present.is_surface_lost)
         return;
 
+    /* Hard evidence that we're going ahead with swapchain creation, demote any existing LL2 chain
+     * that is not ourselves. */
+    d3d12_device_notify_vk_swapchain_creation(chain->queue->device, chain);
+
     /* If we fail to query formats we are hosed, treat it as a SURFACE_LOST scenario. */
     pthread_mutex_lock(&chain->properties.lock);
     /* This is only called on an event where we have to recreate the swapchain,
@@ -2294,18 +2289,6 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
     /* If low latency is supported restore the current low latency state now */
     if (chain->queue->device->vk_info.NV_low_latency2)
     {
-        struct d3d12_device *device = chain->queue->device;
-
-        spinlock_acquire(&device->low_latency_swapchain_spinlock);
-        device->swapchain_info.vk_swapchain_count++;
-
-        if (device->swapchain_info.vk_swapchain_count > 1 && device->swapchain_info.low_latency_swapchain)
-        {
-            dxgi_vk_swap_chain_decref(device->swapchain_info.low_latency_swapchain);
-            device->swapchain_info.low_latency_swapchain = NULL;
-        }
-        spinlock_release(&device->low_latency_swapchain_spinlock);
-
         dxgi_vk_swap_chain_set_low_latency_state(chain, &chain->present.low_latency_state);
         pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
     }
@@ -2404,7 +2387,7 @@ static void dxgi_vk_swap_chain_present_signal_blit_semaphore(struct dxgi_vk_swap
     if (vr)
     {
         ERR("Failed to submit present discard, vr = %d.\n", vr);
-        VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST);
+        VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST, vr);
     }
 }
 
@@ -2443,6 +2426,7 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
 
     memset(&rendering_info, 0, sizeof(rendering_info));
     rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
+    rendering_info.flags = d3d12_device_get_rendering_flags(chain->queue->device);
     rendering_info.renderArea.extent.width = chain->present.backbuffer_width;
     rendering_info.renderArea.extent.height = chain->present.backbuffer_height;
     rendering_info.layerCount = 1;
@@ -2728,7 +2712,7 @@ static bool dxgi_vk_swap_chain_submit_blit(struct dxgi_vk_swap_chain *chain, uin
 
     vr = VK_CALL(vkQueueSubmit2(vk_queue, ARRAY_SIZE(submit_infos), submit_infos, VK_NULL_HANDLE)); // pacer note: todo add later to get the total execution time of a frame, but don't inject into the dependency graph
     vkd3d_queue_release(chain->queue->vkd3d_queue);
-    VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST);
+    VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST, vr);
 
     if (vr < 0)
     {
@@ -3001,7 +2985,7 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
         return;
 
     vr = dxgi_vk_swap_chain_try_acquire_next_image(chain);
-    VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST);
+    VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST, vr);
 
     /* Handle any errors and retry as needed. If we cannot make meaningful forward progress, just give up and retry later. */
     if (vr == VK_SUBOPTIMAL_KHR || vr < 0)
@@ -3139,7 +3123,7 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
                 VK_LATENCY_MARKER_OUT_OF_BAND_PRESENT_END_NV, false);
     }
 
-    VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST);
+    VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST, vr);
 
     if (vr == VK_SUCCESS && vk_result != VK_SUCCESS)
         vr = vk_result;
@@ -3992,8 +3976,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_factory_CreateSwapChain(IDXG
         return hr;
     }
 
-    if (chain->queue->device->vk_info.NV_low_latency2)
-        d3d12_device_register_swapchain(chain->queue->device, chain);
+    d3d12_device_register_low_latency_swapchain(chain->queue->device, chain);
 
     *ppSwapchain = (IDXGIVkSwapChain*)&chain->IDXGIVkSwapChain_iface;
     return S_OK;

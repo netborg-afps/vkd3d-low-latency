@@ -691,6 +691,7 @@ static const struct vkd3d_quirk_to_dxil_mapping
     { VKD3D_SHADER_QUIRK_CLAMP_WAVE_SIZE_TO_THREAD_GROUP32, DXIL_SPV_SHADER_QUIRK_CLAMP_WAVE_SIZE_TO_THREAD_GROUP_32 },
     { VKD3D_SHADER_QUIRK_ENABLE_FAIR_SCHEDULING, DXIL_SPV_SHADER_QUIRK_NON_SEMANTIC_SIGNAL_CONCURRENT_WORKGROUP },
     { VKD3D_SHADER_QUIRK_FORCE_NONUNIFORM_RT, DXIL_SPV_SHADER_QUIRK_FORCE_NONUNIFORM },
+    { VKD3D_SHADER_QUIRK_FORCE_DENORM_LEGACY_FP16_CONVERSIONS, DXIL_SPV_SHADER_QUIRK_FORCE_DENORM_PRESERVE_FP16_CONVERSIONS },
 };
 
 static bool vkd3d_dxil_converter_set_quirks(dxil_spv_converter converter,
@@ -717,7 +718,7 @@ static bool vkd3d_dxil_converter_set_quirks(dxil_spv_converter converter,
         if (dxil_spv_converter_add_option(converter, &helper.base) != DXIL_SPV_SUCCESS)
         {
             WARN("dxil-spirv does not support BRANCH_CONTROL.\n");
-            return VKD3D_ERROR_NOT_IMPLEMENTED;
+            return false;
         }
     }
 
@@ -728,7 +729,7 @@ static bool vkd3d_dxil_converter_set_quirks(dxil_spv_converter converter,
         if (dxil_spv_converter_add_option(converter, &helper.base) != DXIL_SPV_SUCCESS)
         {
             ERR("dxil-spirv does not support INVARIANT_POSITION.\n");
-            return VKD3D_ERROR_NOT_IMPLEMENTED;
+            return false;
         }
     }
 
@@ -739,7 +740,7 @@ static bool vkd3d_dxil_converter_set_quirks(dxil_spv_converter converter,
         if (dxil_spv_converter_add_option(converter, &helper.base) != DXIL_SPV_SUCCESS)
         {
             ERR("dxil-spirv does not support FORCE_SUBGROUP_SIZE_1.\n");
-            return VKD3D_ERROR_NOT_IMPLEMENTED;
+            return false;
         }
     }
 
@@ -750,7 +751,7 @@ static bool vkd3d_dxil_converter_set_quirks(dxil_spv_converter converter,
         if (dxil_spv_converter_add_option(converter, &helper.base) != DXIL_SPV_SUCCESS)
         {
             ERR("dxil-spirv does not support SAMPLE_GRAD_OPTIMIZATION_CONTROL.\n");
-            return VKD3D_ERROR_NOT_IMPLEMENTED;
+            return false;
         }
     }
 
@@ -766,9 +767,28 @@ static bool vkd3d_dxil_converter_set_quirks(dxil_spv_converter converter,
         if (dxil_spv_converter_add_option(converter, &helper.base) != DXIL_SPV_SUCCESS)
         {
             WARN("dxil-spirv does not support DESCRIPTOR_HEAP_ROBUSTNESS.\n");
-            return VKD3D_ERROR_NOT_IMPLEMENTED;
+            return false;
         }
     }
+
+    return true;
+}
+
+static bool vkd3d_dxil_converter_can_use_soft_float_fp16_conv(
+        const struct vkd3d_shader_compile_arguments *compiler_args)
+{
+    /* Only enter this path if we can determine that fp16 denorms are explicitly not supported.
+     * This is a bit quirky since we should be able key off the plain preserve extension,
+     * but we need to avoid hitting NVIDIA's weird cases here where we *assume* FP16 denorms
+     * without explicitly declare it in the shader (_DEFAULT).
+     * NVIDIA doesn't really expose denorm control in a useful way, and
+     * we rely on the default behavior instead to avoid leaking FP16 denorm state into FP32. */
+
+    unsigned int i;
+    for (i = 0; i < compiler_args->target_extension_count; i++)
+        if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_SUPPORT_FP16_DENORM_PRESERVE ||
+            compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_SUPPORT_FP16_DENORM_PRESERVE_DEFAULT)
+            return false;
 
     return true;
 }
@@ -782,6 +802,9 @@ static int vkd3d_dxil_converter_set_options(dxil_spv_converter converter,
     dxil_spv_option_denorm_preserve_support denorm_preserve = {{ DXIL_SPV_OPTION_DENORM_PRESERVE_SUPPORT }};
     dxil_spv_option_float8_support float8 = {{ DXIL_SPV_OPTION_FLOAT8_SUPPORT }};
     unsigned int i, j, max_tess_factor;
+
+    if (!vkd3d_dxil_converter_can_use_soft_float_fp16_conv(compiler_args))
+        quirks &= ~VKD3D_SHADER_QUIRK_FORCE_DENORM_LEGACY_FP16_CONVERSIONS;
 
     if (!vkd3d_dxil_converter_set_quirks(converter, shader_interface_info, quirks))
     {
@@ -1265,6 +1288,18 @@ static int vkd3d_dxil_converter_set_options(dxil_spv_converter converter,
                     return VKD3D_ERROR_NOT_IMPLEMENTED;
                 }
             }
+            else if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_SHADER_ABORT)
+            {
+                static const dxil_spv_option_shader_abort shader_abort = {
+                    { DXIL_SPV_OPTION_SHADER_ABORT }, DXIL_SPV_TRUE,
+                };
+
+                if (dxil_spv_converter_add_option(converter, &shader_abort.base) != DXIL_SPV_SUCCESS)
+                {
+                    ERR("dxil-spirv does not support SHADER_ABORT.\n");
+                    return VKD3D_ERROR_NOT_IMPLEMENTED;
+                }
+            }
         }
 
         if (compiler_args->driver_version)
@@ -1498,6 +1533,8 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
         spirv->meta.flags |= VKD3D_SHADER_META_FLAG_FORCE_GRAPHICS_BARRIER_BEFORE_RENDER_PASS;
     if (quirks & VKD3D_SHADER_QUIRK_FORCE_GRAPHICS_BARRIER_BEFORE_DRAW)
         spirv->meta.flags |= VKD3D_SHADER_META_FLAG_FORCE_GRAPHICS_BARRIER_BEFORE_DRAW;
+    if (quirks & VKD3D_SHADER_QUIRK_FORCE_FEEDBACK_LOOP)
+        spirv->meta.flags |= VKD3D_SHADER_META_FLAG_FEEDBACK_LOOP;
 
     /* This quirk should only apply to exports. */
     quirks &= ~VKD3D_SHADER_QUIRK_FORCE_NONUNIFORM_RT;
@@ -1645,6 +1682,16 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
     if (!wave_size_max)
         wave_size_max = wave_size_min;
 
+    if ((stage == DXIL_SPV_STAGE_COMPUTE || stage == DXIL_SPV_STAGE_MESH || stage == DXIL_SPV_STAGE_AMPLIFICATION) &&
+        wave_size_max == 32 &&
+        (quirks & VKD3D_SHADER_QUIRK_CLAMP_WAVE_SIZE_TO_THREAD_GROUP32) &&
+        spirv->meta.cs_workgroup_size[0] == 32 &&
+        spirv->meta.cs_workgroup_size[1] == 1 &&
+        spirv->meta.cs_workgroup_size[2] == 1)
+    {
+        spirv->meta.flags |= VKD3D_SHADER_META_FLAG_ALLOW_WAVE32;
+    }
+
     if (compiler_args->promote_wave_size_heuristics)
     {
         dxil_spv_converter_get_compute_heuristic_min_wave_size(converter, &heuristic_min_wave_size);
@@ -1671,6 +1718,14 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
                 wave_size_preferred = heuristic_min_wave_size;
             }
         }
+    }
+
+    if (quirks & VKD3D_SHADER_QUIRK_DEBUG_FORCE_MIN_WAVE64)
+    {
+        /* Force it when we use the debug quirk. */
+        wave_size_min = 64;
+        wave_size_max = 64;
+        wave_size_preferred = 64;
     }
 
     spirv->meta.cs_wave_size_min = wave_size_min;

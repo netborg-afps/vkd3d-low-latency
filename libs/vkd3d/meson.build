@@ -21,6 +21,9 @@ vkd3d_shaders =[
   'shaders/cs_resolve_predicate.comp',
   'shaders/cs_resolve_query.comp',
 
+  'shaders/cs_copy_buffer_to_emulated_d24.comp',
+  'shaders/cs_copy_emulated_d24_to_buffer.comp',
+
   'shaders/fs_copy_image_float.frag',
   'shaders/fs_copy_image_uint.frag',
   'shaders/fs_copy_image_stencil.frag',
@@ -71,6 +74,7 @@ vkd3d_src = [
   'command_queue_vkd3d_ext.c',
   'd3dkmt.c',
   'device.c',
+  'device_workarounds.c',
   'device_vkd3d_ext.c',
   'heap.c',
   'memory.c',
