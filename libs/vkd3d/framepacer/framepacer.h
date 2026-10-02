@@ -11,7 +11,7 @@
 #include "jitter_stats.h"
 #include "util/sync/sync_ringbuffer_allocator.h"
 #include "util/util_log.h"
-
+#include <cmath>
 
 /* \brief Frame pacer interface managing the CPU - GPU synchronization.
  *
