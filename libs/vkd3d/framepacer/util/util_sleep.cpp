@@ -35,11 +35,11 @@ namespace dxvk {
     HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
 
     if (ntdll) {
-      NtDelayExecution = reinterpret_cast<NtDelayExecutionProc>(
+      NtDelayExecution = reinterpret_cast<NtDelayExecutionProc>((void*)
         ::GetProcAddress(ntdll, "NtDelayExecution"));
-      auto NtQueryTimerResolution = reinterpret_cast<NtQueryTimerResolutionProc>(
+      auto NtQueryTimerResolution = reinterpret_cast<NtQueryTimerResolutionProc>((void*)
         ::GetProcAddress(ntdll, "NtQueryTimerResolution"));
-      auto NtSetTimerResolution = reinterpret_cast<NtSetTimerResolutionProc>(
+      auto NtSetTimerResolution = reinterpret_cast<NtSetTimerResolutionProc>((void*)
         ::GetProcAddress(ntdll, "NtSetTimerResolution"));
 
       ULONG min, max, cur;
@@ -95,6 +95,34 @@ namespace dxvk {
 
     // Busy-wait until we have slept long enough
     while (remaining > TimerDuration::zero()) {
+      t1 = high_resolution_clock::now();
+      remaining -= std::chrono::duration_cast<TimerDuration>(t1 - t0);
+      t0 = t1;
+    }
+
+    return t1;
+  }
+
+
+  Sleep::TimePoint Sleep::sleepCoarse(TimePoint t0, TimerDuration duration) {
+    // this coarse sleep doesn't do the spin wait for minimum cpu usage
+    if (duration <= TimerDuration::zero())
+      return t0;
+
+    // If necessary, initialize function pointers and some values
+    if (!m_initialized.load(std::memory_order_acquire))
+      initialize();
+
+    TimerDuration sleepThreshold = m_sleepThreshold;
+
+    TimerDuration remaining = duration;
+    TimePoint t1 = t0;
+
+    while (remaining > sleepThreshold) {
+      TimerDuration sleepDuration = remaining - sleepThreshold;
+
+      systemSleep(sleepDuration);
+
       t1 = high_resolution_clock::now();
       remaining -= std::chrono::duration_cast<TimerDuration>(t1 - t0);
       t0 = t1;
