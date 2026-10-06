@@ -28,6 +28,11 @@ namespace dxvk {
       return s_instance.sleep(t0, std::chrono::duration_cast<TimerDuration>(duration));
     }
 
+    template<typename Rep, typename Period>
+    static TimePoint sleepForCoarse(TimePoint t0, std::chrono::duration<Rep, Period> duration) {
+      return s_instance.sleepCoarse(t0, std::chrono::duration_cast<TimerDuration>(duration));
+    }
+
     /**
      * \brief Sleeps until a given time point
      *
@@ -70,6 +75,7 @@ namespace dxvk {
     void initializePlatformSpecifics();
 
     TimePoint sleep(TimePoint t0, TimerDuration duration);
+    TimePoint sleepCoarse(TimePoint t0, TimerDuration duration);
 
     void systemSleep(TimerDuration duration);
 
