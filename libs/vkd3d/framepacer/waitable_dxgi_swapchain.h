@@ -1,6 +1,7 @@
 #pragma once
 
 #include "util/sync/sync_atomic_signal.h"
+#include "util/util_sleep.h"
 #include <stdint.h>
 
 namespace pacer {
@@ -11,13 +12,15 @@ namespace pacer {
         WaitableDXGISwapchain( Device* device, LatencyMarkersStorage& latencyMarkers, FrameSync& frameSync,
             std::function<void(uint64_t, dxvk::high_resolution_clock::time_point)> sleep )
         : m_device(device), m_latencyMarkers(latencyMarkers), m_frameSync(frameSync), m_sleep(std::move(sleep)),
-          m_thread([this] { threadFunc(); }) { }
+          m_thread([this] { threadFunc(); }),
+          m_watchdogThread([this] { watchdogThreadFunc(); }) { }
 
         ~WaitableDXGISwapchain() {
 
             m_stopped.store(true);
             m_signal.signal_one();
             m_thread.join();
+            m_watchdogThread.join();
 
         }
 
@@ -108,12 +111,48 @@ namespace pacer {
                 while (WaitForSingleObject((*latencyEvent).handle, 0) == WAIT_OBJECT_0)
                     { }
                 vkd3d_native_sync_handle_release(*latencyEvent, 1);
+
+                WatchdogContext context;
+                context.latencyEvent = latencyEvent;
+                context.t = dxvk::high_resolution_clock::now();
+                {   std::lock_guard<dxvk::mutex> lock(m_watchdogMutex);
+                    m_watchdogContext = context;
+                }
+
                 if (usingWaitableSwapchain) {
                     _INFO( "setting m_new->start \n" );
                     m_new->start = dxvk::high_resolution_clock::now();
                 }
 
                 m_ready.signal_one();
+
+            }
+
+        }
+
+        void watchdogThreadFunc() {
+
+            while (!m_stopped.load(std::memory_order_acquire)) {
+
+                WatchdogContext context;
+                {   std::lock_guard<dxvk::mutex> lock(m_watchdogMutex);
+                    context = m_watchdogContext;
+                }
+
+                auto now = dxvk::high_resolution_clock::now();
+
+                if (context.latencyEvent && now > context.t + std::chrono::milliseconds( 500 )) {
+                    // Had been an issue when booting up Dead Space (remake) where shader compilation
+                    // made some frames take 10+ seconds to complete. The Frostbite engine detects a timeout
+                    // with a made-up "DXGI_ERROR_DEVICE_HUNG" when we don't give it a second cpu-sided in-flight frame.
+                    WARN("detected slow frame, releasing waitable swapchain object temporarily to make game watchdogs happy \n");
+                    vkd3d_native_sync_handle_release(*context.latencyEvent, 1);
+                    std::lock_guard<dxvk::mutex> lock(m_watchdogMutex);
+                    if (m_watchdogContext.t == context.t)
+                        m_watchdogContext = WatchdogContext{};
+                }
+
+                dxvk::Sleep::sleepForCoarse( now, std::chrono::milliseconds( 200 ) );
 
             }
 
@@ -140,6 +179,18 @@ namespace pacer {
         uint64_t m_presentCounterPrint = { 32 };
 
         dxvk::thread m_thread;
+
+        // watchdog
+
+        using time_point = dxvk::high_resolution_clock::time_point;
+        struct WatchdogContext {
+            vkd3d_native_sync_handle* latencyEvent = { nullptr };
+            time_point t = { };
+        };
+
+        WatchdogContext m_watchdogContext;
+        dxvk::mutex     m_watchdogMutex;
+        dxvk::thread    m_watchdogThread;
 
     };
 
