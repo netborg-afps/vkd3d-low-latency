@@ -40,13 +40,13 @@ namespace pacer {
                 return;
             }
 
-            if (!m_watchdogSpawned.load(std::memory_order_relaxed) && !m_watchdogSpawned.exchange(true))
-                m_watchdogThread = dxvk::thread([this] { watchdogThreadFunc(); });
-
             ++m_presentCounter;
 
             vkd3d_native_sync_handle* latencyEvent = m_device->getLatencyEvent(vkd3d_swapchain);
             if (latencyEvent && vkd3d_native_sync_handle_is_valid(*latencyEvent)) {
+
+                if (!m_watchdogSpawned.load(std::memory_order_relaxed) && !m_watchdogSpawned.exchange(true))
+                    m_watchdogThread = dxvk::thread([this] { watchdogThreadFunc(); });
 
                 // we don't block here - in dxgi.present() - other than for some reason
                 // the game isn't using its waitable swapchain handle such that it calls
