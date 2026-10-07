@@ -12,15 +12,16 @@ namespace pacer {
         WaitableDXGISwapchain( Device* device, LatencyMarkersStorage& latencyMarkers, FrameSync& frameSync,
             std::function<void(uint64_t, dxvk::high_resolution_clock::time_point)> sleep )
         : m_device(device), m_latencyMarkers(latencyMarkers), m_frameSync(frameSync), m_sleep(std::move(sleep)),
-          m_thread([this] { threadFunc(); }),
-          m_watchdogThread([this] { watchdogThreadFunc(); }) { }
+          m_thread([this] { threadFunc(); }) { }
 
         ~WaitableDXGISwapchain() {
 
             m_stopped.store(true);
             m_signal.signal_one();
             m_thread.join();
-            m_watchdogThread.join();
+
+            if (m_watchdogThread.joinable())
+                m_watchdogThread.join();
 
         }
 
@@ -38,6 +39,9 @@ namespace pacer {
                 releaseSemaphore( vkd3d_swapchain, 3 );
                 return;
             }
+
+            if (!m_watchdogSpawned.load(std::memory_order_relaxed) && !m_watchdogSpawned.exchange(true))
+                m_watchdogThread = dxvk::thread([this] { watchdogThreadFunc(); });
 
             ++m_presentCounter;
 
@@ -188,9 +192,10 @@ namespace pacer {
             time_point t = { };
         };
 
-        WatchdogContext m_watchdogContext;
-        dxvk::mutex     m_watchdogMutex;
-        dxvk::thread    m_watchdogThread;
+        WatchdogContext     m_watchdogContext;
+        dxvk::mutex         m_watchdogMutex;
+        dxvk::thread        m_watchdogThread;
+        std::atomic<bool>   m_watchdogSpawned = { false };
 
     };
 
