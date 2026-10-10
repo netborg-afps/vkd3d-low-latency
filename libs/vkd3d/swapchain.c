@@ -2893,9 +2893,6 @@ static bool dxgi_vk_swap_chain_setup_present_timing_request(
         timing_info->targetTime = effective_interval * chain->request.swap_interval;
         timing_info->targetTime = max(timing_info->targetTime, frame_limiter_ns);
 
-        if (pacer_is_running(chain->queue->device->pacer_device))
-            timing_info->targetTime = 0;
-
         if (chain->timing.refresh_interval == VRR_INTERVAL)
             frame_limiter_is_floating_cycle = true;
 
@@ -3055,7 +3052,8 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
         }
     }
 
-    pacing_should_wait = present_mode_pacing_should_wait(chain->present.selected_present_mode);
+    pacing_should_wait = present_mode_pacing_should_wait(chain->present.selected_present_mode)
+        && !pacer_is_running(chain->queue->device->pacer_device);
 
     /* Only bother with present-wait path for capped swapchains like FIFO and FIFO Relaxed.
      * Uncapped swapchains will pump their frame latency handles through the fallback path of blit command being done.
@@ -3109,6 +3107,13 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
 
         if (use_present_id)
             vk_prepend_struct(&present_info, &timings_info);
+
+        // disable presenting at a target timestamp if the pacer is active
+        if (pacer_is_running(chain->queue->device->pacer_device))
+        {
+            timing_info.flags = 0;
+            timing_info.targetTime = 0;
+        }
     }
 
     vk_queue = vkd3d_queue_acquire(chain->queue->vkd3d_queue);
