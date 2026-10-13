@@ -80,7 +80,6 @@ namespace pacer {
 
             InFlight inFlight;
             inFlight.numInFlight = frameId - gpuFinishedId;
-            inFlight.earliestFrameId = gpuFinishedId+1;
             inFlight.m = m_latencyMarkers->getConstMarkers(frameId-1);
             inFlight.m_prev = m_latencyMarkers->getConstMarkers(frameId-2);
             inFlight.m_prev_prev = m_latencyMarkers->getConstMarkers(frameId-3);
@@ -315,7 +314,6 @@ namespace pacer {
 
         struct InFlight {
             uint16_t numInFlight = { 1 };
-            uint64_t earliestFrameId = { 0 };
             const LatencyMarkers* m = { nullptr };
             const LatencyMarkers* m_prev = { nullptr };
             const LatencyMarkers* m_prev_prev = { nullptr };
