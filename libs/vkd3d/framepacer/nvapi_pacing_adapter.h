@@ -7,120 +7,148 @@
 
 namespace pacer {
 
-    class NvApi_FrameId {
+    /*
+     * Synchronization philosophy:
+     * Use a buffer of sufficient size to store all marker timestamps,
+     * such that well-behaving games can operate at maximum performance.
+     *
+     * The buffer size will act as a safety net for wild use of nv ids,
+     * but there may be games out there falling through. Teared data is
+     * possible in extreme cases.
+     *
+     * Microbenchmarks showed a setLatencyMarker call takes less than
+     * 0.2 microseconds on average and almost never over 2 microseconds,
+     * which makes it fulfill the role of not contributing to jitter.
+     */
+
+    class NvApi_FrameIdMap {
         using time_point = dxvk::high_resolution_clock::time_point;
         using microseconds = std::chrono::microseconds;
     public:
 
-        uint64_t getId( uint64_t nvId ) {
-            uint64_t seq1, seq2;
-            uint64_t res;
-
-            do {
-                res = 0;
-                seq1 = m_seq.load(std::memory_order_acquire);
-                for (Mapping& mapping : m_mapping) {
-                    if (mapping.nvId.load(std::memory_order_relaxed) == nvId) {
-                        res = mapping.pacerId.load(std::memory_order_relaxed);
-                        break;
-                    }
-                }
-                seq2 = m_seq.load(std::memory_order_acquire);
-            } while ((seq1 & 1) == 1 || seq1 != seq2);
-
-            return res;
-        }
-
-        FramePacer::FrameInfo getFrameInfo( uint64_t nvId ) {
-            uint64_t seq1, seq2;
-            FramePacer::FrameInfo res;
-
-            do {
-                res = FramePacer::FrameInfo {};
-                seq1 = m_seq.load(std::memory_order_acquire);
-                for (Mapping& mapping : m_mapping) {
-                    if (mapping.nvId.load(std::memory_order_relaxed) == nvId) {
-                        res.externalId = mapping.pacerId.load(std::memory_order_relaxed);
-                        res.start_t = mapping.start_t.load(std::memory_order_relaxed);
-                        res.renderStart = mapping.renderStart.load(std::memory_order_acquire);
-                        res.renderEnd =  mapping.renderEnd.load(std::memory_order_acquire);
-                        break;
-                    }
-                }
-                seq2 = m_seq.load(std::memory_order_acquire);
-            } while ((seq1 & 1) == 1 || seq1 != seq2);
-
-            return res;
-        }
-
-        void updateRenderStart( uint64_t nvId, time_point t ) {
-            updateTimestamp<&Mapping::renderStart>( nvId, t );
-        }
-
-        void updateRenderEnd( uint64_t nvId, time_point t ) {
-            updateTimestamp<&Mapping::renderEnd>( nvId, t );
-        }
-
-        uint64_t pushMapping( uint64_t nvId, time_point t ) {
-            // making seq odd: preventing reads, assumes one simultaneous writer
-            m_seq.fetch_add(1, std::memory_order_release);
-
-            for (Mapping& mapping : m_mapping) {
-                if (mapping.nvId.load(std::memory_order_relaxed) == nvId) {
-                    WARN( "trying to push nv-id %" PRIu64
-                          " to nvApi frame-id mapping, but is already registered \n", nvId );
-                    m_seq.fetch_add(1, std::memory_order_release);
-                    return 0;
-                }
-            }
-            uint64_t index = m_curIndex % m_mapping.size();
-            uint64_t pacerId = m_pacerSimulationId++;
-            ++m_curIndex;
-            m_mapping[index].pacerId.store( pacerId, std::memory_order_relaxed );
-            m_mapping[index].start_t.store( t, std::memory_order_relaxed );
-            m_mapping[index].renderStart.store( 0, std::memory_order_relaxed );
-            m_mapping[index].renderEnd.store( 0, std::memory_order_relaxed );
-            // release
-            m_mapping[index].nvId.store( nvId, std::memory_order_release );
-            m_seq.fetch_add(1, std::memory_order_release); // make seq even again
-
-            _INFO( "registered nv-id %" PRIu64
-                  " to pacer-frame-id %" PRIu64 " in nvApi mapping \n", nvId, pacerId );
-
-            return pacerId;
-        }
-
-    private:
-
-        template <auto Timestamp>
-        void updateTimestamp( uint64_t nvId, time_point t ) {
-            // don't check the seq lock here, trust the ringbuffer
-
-            for (Mapping& mapping : m_mapping) {
-                if (mapping.nvId.load(std::memory_order_acquire) == nvId) {
-                    int32_t value = std::chrono::duration_cast<microseconds>(
-                        t - mapping.start_t.load(std::memory_order_relaxed)).count();
-                    int32_t expected = 0;
-                    (mapping.*Timestamp).compare_exchange_strong( expected, value,
-                        std::memory_order_release, std::memory_order_relaxed );
-                    return;
-                }
-            }
-        }
-
-        struct alignas(64) Mapping {
+        struct alignas(64) PacerFrame {
             std::atomic<uint64_t> pacerId;
-            std::atomic<uint64_t> nvId;
             std::atomic<time_point> start_t;
             std::atomic<int32_t> renderStart;
             std::atomic<int32_t> renderEnd;
         };
 
-        std::array< Mapping, 16 > m_mapping = { };
-        int64_t m_curIndex = { 0 };
+         /* Seqlock, and memory orderings based on:
+            * Wait-Free Thread Synchronisation With the SeqLock - Timur Doumler - ADC 2024
+            * https://www.youtube.com/watch?v=uiBMczcm69A
+            * Can Seqlocks Get Along with Programming Language Memory Models? - Hans-J. Boehm
+            * https://dl.acm.org/doi/epdf/10.1145/2247684.2247688
+          */
+
+        PacerFrame* getFrame( uint64_t nvId ) {
+            size_t seq1, seq2;
+            PacerFrame* res;
+
+            do {
+                res = nullptr;
+                seq1 = m_seq.load( std::memory_order_acquire );
+                for (size_t i=0; i<NUM_FRAMES; ++i) {
+                    if (m_nvIds[i].load( std::memory_order_relaxed ) == nvId) {
+                        res = &m_frames[i];
+                        break;
+                    }
+                }
+                std::atomic_thread_fence( std::memory_order_acquire );
+                seq2 = m_seq.load( std::memory_order_relaxed );
+            } while (seq1 & 1 || seq1 != seq2);
+
+            return res;
+        }
+
+        uint64_t registerNvId( uint64_t nvId, time_point t ) {
+            // we can only have one writer simultaneously
+            std::lock_guard<dxvk::mutex> lock(m_nvIdsMutex);
+            // check if the id really isn't registered yet
+            for (size_t i=0; i<NUM_FRAMES; ++i) {
+                if (m_nvIds[i].load( std::memory_order_relaxed ) == nvId)
+                    return INVALID_PACER_ID;
+            }
+
+            // making seq odd: preventing reads
+            size_t oldSeq = m_seq.load( std::memory_order_relaxed );
+            m_seq.store( oldSeq + 1, std::memory_order_relaxed );
+            std::atomic_thread_fence( std::memory_order_release );
+
+            uint16_t index = m_curIndex++ % NUM_FRAMES;
+            uint64_t pacerId = m_pacerSimulationId++;
+
+            m_frames[index].pacerId.store( pacerId, std::memory_order_relaxed );
+            m_frames[index].start_t.store( t, std::memory_order_relaxed );
+            m_frames[index].renderStart.store( 0, std::memory_order_relaxed );
+            m_frames[index].renderEnd.store( 0, std::memory_order_relaxed );
+
+            m_nvIds[index].store( nvId, std::memory_order_relaxed );
+
+            // make seq even again: allowing reads
+            m_seq.store( oldSeq + 2, std::memory_order_release );
+
+            return pacerId;
+        }
+
+
+        FramePacer::FrameInfo getFrameInfo( uint64_t nvId ) {
+            PacerFrame* frame = getFrame(nvId);
+            if (!frame)
+                return FramePacer::FrameInfo{};
+
+            FramePacer::FrameInfo res;
+            res.externalId = frame->pacerId.load( std::memory_order_relaxed );
+            res.start_t = frame->start_t.load( std::memory_order_relaxed );
+            res.renderStart = frame->renderStart.load( std::memory_order_relaxed );
+            res.renderEnd =  frame->renderEnd.load( std::memory_order_relaxed );
+
+            return res;
+        }
+
+        void updateRenderStart( uint64_t nvId ) {
+            updateTimestamp<&PacerFrame::renderStart>( nvId );
+        }
+
+        void updateRenderEnd( uint64_t nvId ) {
+            updateTimestamp<&PacerFrame::renderEnd>( nvId );
+        }
+
+        constexpr static uint64_t INVALID_PACER_ID = 0;
+
+    private:
+
+        template <auto Timestamp>
+        void updateTimestamp( uint64_t nvId ) {
+            auto now = dxvk::high_resolution_clock::now();
+            PacerFrame* frame = getFrame(nvId);
+            if (!frame)
+                return;
+
+            int32_t old = (frame->*Timestamp).load( std::memory_order_relaxed );
+            int32_t value = std::chrono::duration_cast<microseconds>(
+                        now - frame->start_t.load( std::memory_order_relaxed )).count();
+
+            // we aren't using compare-exchange here because of performance,
+            // still this should give us the same data in 99.99% of cases
+            if (!old || value < old)
+                (frame->*Timestamp).store( value, std::memory_order_relaxed );
+        }
+
+        static constexpr size_t NUM_FRAMES = 16;
+
+        // nv id lookup protected by a seq lock, mutex is used to serialize the writers.
+        // seq lock guarantees maximum performance on reader paths
+
+        alignas(64) dxvk::mutex m_nvIdsMutex;
+        alignas(64) std::array< std::atomic<uint64_t>, NUM_FRAMES > m_nvIds = { };
+        alignas(64) std::atomic< size_t > m_seq = { 0 };
+
+        // once the pacer-frame is found for nvId, we access this data without any lock
+
+        std::array< PacerFrame, NUM_FRAMES > m_frames = { };
+        size_t m_curIndex = { 0 };
         uint64_t m_pacerSimulationId = { 2 };
 
-        alignas(64) std::atomic< uint64_t > m_seq = { 0 };
     };
 
 
@@ -135,14 +163,14 @@ namespace pacer {
 
         void sleepAndBeginFrame() {
             // only sleep once before seeing a simulation marker
-            uint64_t pacerId = m_pacerState.simulation + 1;
+            uint64_t pacerId = m_pacerState.simulation.load( std::memory_order_acquire ) + 1;
 
-            if (!m_pendingSleep) {
+            if (!m_pendingSleep.load( std::memory_order_acquire )) {
                 _INFO( "sleeping for pacerId %" PRIu64 " \n", pacerId );
-                // todo: we changed this timestamp from being taken at simulation start to here
-                //       to make the limiter acting correctly - need to check what this changes for other cases
-                m_device->m_pacer->sleep(pacerId + m_pacerState.drift, m_lastEndSleep.load(std::memory_order_acquire));
-                m_pendingSleep = true;
+                m_device->m_pacer->sleep(
+                    pacerId + m_pacerState.drift.load( std::memory_order_acquire ),
+                    m_lastEndSleep.load( std::memory_order_acquire ));
+                m_pendingSleep.store( true, std::memory_order_release );
             }
 
             auto t = dxvk::high_resolution_clock::now();
@@ -150,38 +178,35 @@ namespace pacer {
         }
 
         void setLatencyMarker( uint64_t nvId, VkLatencyMarkerNV marker ) {
-            if (m_device->m_activeType.load(std::memory_order_acquire) != Device::NVIDIA_Reflex)
+            if (m_device->m_activeType.load( std::memory_order_relaxed ) != Device::NVIDIA_Reflex)
                 return;
 
             using namespace std::chrono;
             switch (marker) {
 
                 case VK_LATENCY_MARKER_SIMULATION_START_NV: {
-                    // commiting a frame start to the pacer here,
+                    // commiting a frame start to the pacer here, which means the last sleep
+                    // gets connected to the simulation marker here, and the sleep is
+                    // connected to the internal pacer frames.
                     // the pacer might have different internal ids which we need to know
                     // when we perform the sleep, which is accounted for with the "drift" variable
                     _INFO( "VK_LATENCY_MARKER_SIMULATION_START_NV %" PRIu64 "\n", nvId );
 
-                    if (m_mapping.getId( nvId ) != INVALID_ID) {
+                    auto t = m_lastEndSleep.load( std::memory_order_acquire );
+                    uint64_t pacerId = m_mapping.registerNvId( nvId, t );
+
+                    if (pacerId == NvApi_FrameIdMap::INVALID_PACER_ID) {
                         // we've seen this id already before, so ignore it
                         // some games like Hitman WOA have multiple parallel simulation threads
                         break;
                     }
 
-                    if (!m_pendingSleep && m_device->m_activeType.load(std::memory_order_acquire) == Device::NVIDIA_Reflex )
-                        WARN( "Simulation marker without prior sleep. Game doesn't want to get paced? \n");
+                    if (unlikely( !m_pendingSleep.load( std::memory_order_acquire ) ))
+                        WARN( "Simulation marker without prior sleep. Game doesn't want to get paced? \n" );
 
-                    // we have filtered out most of concurrent access possibilities here already
-                    // but there is still a tiny chance for that which we cannot let happen
-                    std::lock_guard<dxvk::mutex> lockGuard(m_mappingGuard);
-
-                    auto t = m_lastEndSleep.load( std::memory_order_acquire );
-                    uint64_t pacerId = m_mapping.pushMapping( nvId, t );
                     _INFO( "timestamp stored for pacerId %" PRIu64 " \n", pacerId );
-                    if (pacerId) {
-                        m_pacerState.simulation = pacerId;
-                        m_pendingSleep = false;
-                    }
+                    m_pacerState.simulation.store( pacerId, std::memory_order_release );
+                    m_pendingSleep.store( false, std::memory_order_release );
                     break;
                 }
 
@@ -189,25 +214,21 @@ namespace pacer {
                     _INFO( "VK_LATENCY_MARKER_SIMULATION_END_NV %" PRIu64 "\n", nvId );
                     break;
 
-                case VK_LATENCY_MARKER_RENDERSUBMIT_START_NV: {
-                    auto now = dxvk::high_resolution_clock::now();
+                case VK_LATENCY_MARKER_RENDERSUBMIT_START_NV:
                     _INFO( "VK_LATENCY_MARKER_RENDERSUBMIT_START_NV %" PRIu64 "\n", nvId );
-                    m_mapping.updateRenderStart( nvId, now );
+                    m_mapping.updateRenderStart( nvId );
                     break;
-                }
 
-                case VK_LATENCY_MARKER_RENDERSUBMIT_END_NV: {
-                    auto now = dxvk::high_resolution_clock::now();
+                case VK_LATENCY_MARKER_RENDERSUBMIT_END_NV:
                     _INFO( "VK_LATENCY_MARKER_RENDERSUBMIT_END_NV %" PRIu64 "\n", nvId );
-                    m_mapping.updateRenderEnd( nvId, now );
+                    m_mapping.updateRenderEnd( nvId );
                     break;
-                }
 
                 case VK_LATENCY_MARKER_PRESENT_START_NV: {
                     _INFO( "VK_LATENCY_MARKER_PRESENT_START_NV %" PRIu64 "\n", nvId );
                     FramePacer::FrameInfo frameInfo = m_mapping.getFrameInfo( nvId );
                     uint64_t& pacerId = frameInfo.externalId;
-                    if (pacerId != INVALID_ID) {
+                    if (pacerId != NvApi_FrameIdMap::INVALID_PACER_ID) {
                         int64_t drift = m_device->m_pacer->registerExternalId( pacerId, frameInfo );
                         _INFO( " present resolve: \n"
                                "   pacerId = %" PRIu64 " \n"
@@ -215,7 +236,7 @@ namespace pacer {
                                "   projected cpuId = %" PRIu64 " \n",
                                pacerId, drift, pacerId + drift );
                         if (drift != std::numeric_limits<int64_t>::max())
-                            m_pacerState.drift = drift;
+                            m_pacerState.drift.store( drift, std::memory_order_release );
                     }
                     break;
                 }
@@ -234,8 +255,6 @@ namespace pacer {
 
         Device* m_device;
 
-        static constexpr uint64_t INVALID_ID = { 0 };
-
         std::atomic<bool> m_pendingSleep = { false };
         std::atomic<time_point> m_lastEndSleep = { };
 
@@ -245,8 +264,7 @@ namespace pacer {
         };
 
         PacerState m_pacerState;
-        NvApi_FrameId m_mapping;
-        dxvk::mutex m_mappingGuard;
+        NvApi_FrameIdMap m_mapping;
 
     };
 

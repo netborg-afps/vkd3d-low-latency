@@ -37,7 +37,7 @@ namespace pacer {
 
         virtual ~FramePacerMode() { }
 
-        virtual void startFrame( uint64_t frameId, time_point lastSimulationStart ) { }
+        virtual void startFrame( uint64_t frameId, time_point lastFrameStart ) { }
         virtual void endFrame( uint64_t frameId ) { }
 
         virtual void finishRender( uint64_t frameId ) { }

@@ -45,7 +45,7 @@ namespace pacer {
         FramePacer( Device* device, uint64_t firstFrameId );
         ~FramePacer();
 
-        void sleep( uint64_t frameId, time_point lastSimulationStart ) {
+        void sleep( uint64_t frameId, time_point lastFrameStart ) {
             _INFO( "sleep - frameId: %" PRIu64 ", m_frameSync.cpuFinished: %"
                 PRIu64 " m_frameSync.gpuFinished: %" PRIu64 " \n",
                 frameId, m_frameSync.cpuFinished.load(), m_frameSync.gpuFinished.load() );
@@ -57,7 +57,7 @@ namespace pacer {
                 return;
             }
             // potentially wait some more if the cpu gets too much ahead
-            m_mode->startFrame(frameId, lastSimulationStart);
+            m_mode->startFrame(frameId, lastFrameStart);
         }
 
         int64_t registerExternalId( uint64_t externalId, const FrameInfo& frameInfo ) {
