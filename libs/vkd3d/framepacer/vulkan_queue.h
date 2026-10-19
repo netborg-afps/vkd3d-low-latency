@@ -131,6 +131,52 @@ namespace pacer {
 
         }
 
+        // Top-of-pipe timestamps are read on this dedicated thread for every submit.
+        // Waiting with VK_QUERY_RESULT_WAIT_BIT is implemented as a busy-wait by some
+        // drivers (NVIDIA spins with pause + clock_gettime), which kept this thread at
+        // ~100% of a CPU core for the whole session. Poll without WAIT_BIT and sleep
+        // between attempts instead: the timestamp value is written by the GPU, so its
+        // precision is unaffected; we only pick it up up to one sleep later (~100 us
+        // plus timer slack under Wine, a timer tick on native Windows). Readers already
+        // skip submits whose start timestamp is still 0.
+        static constexpr std::chrono::microseconds QueryPollInterval{ 100 };
+
+        VkResult pollQueryPoolResult( pacer_query_pool* queryPool, uint64_t* timestamp ) const {
+
+            assert( queryPool );
+            VkResult res;
+            for (;;) {
+                res = m_device->m_vkProcs.vkGetQueryPoolResults(
+                  m_device->m_properties.vk_device, queryPool->pool, 0, 1, sizeof(uint64_t),
+                  timestamp, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT
+                );
+                if (res != VK_NOT_READY || m_stopped.load( std::memory_order_acquire ))
+                    break;
+                pollSleep();
+            }
+            if (unlikely(res != VK_SUCCESS && res != VK_NOT_READY))
+                ERR( "FramePacer: vkGetQueryPoolResults returned %d \n", res);
+            return res;
+
+        }
+
+        static void pollSleep() {
+
+#ifdef _WIN32
+            using NtDelayExecutionProc = LONG (NTAPI *) (BOOLEAN, LARGE_INTEGER*);
+            static NtDelayExecutionProc delay = reinterpret_cast<NtDelayExecutionProc>((void*)
+                ::GetProcAddress( ::GetModuleHandleW(L"ntdll.dll"), "NtDelayExecution" ));
+            if (delay) {
+                LARGE_INTEGER ticks;
+                ticks.QuadPart = -int64_t(QueryPollInterval.count()) * 10; // 100 ns units, negative = relative
+                delay( FALSE, &ticks );
+                return;
+            }
+#endif
+            std::this_thread::sleep_for( QueryPollInterval );
+
+        }
+
         void initVulkanObjects() {
 
             pacer_device_vk_procs* vk_procs = &m_device->m_vkProcs;
@@ -279,8 +325,8 @@ namespace pacer {
                 }
 
                 assert( item.queryPool );
-                uint64_t gpuTimestamp;
-                getQueryPoolResult( item.queryPool, &gpuTimestamp );
+                uint64_t gpuTimestamp = 0;
+                pollQueryPoolResult( item.queryPool, &gpuTimestamp );
                 m_gpuExecutionStart[ item.submitId % NUM_SUBMITS ].store(gpuTimestamp);
                 freeQueryPoolTopOfPipe( item.queryPool );
 
