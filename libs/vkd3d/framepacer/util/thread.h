@@ -400,4 +400,6 @@ namespace dxvk {
   }
 #endif
 
+  void setThreadName(const char* _name);
+
 }
