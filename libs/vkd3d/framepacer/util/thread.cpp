@@ -1,4 +1,5 @@
 #include <atomic>
+#include <array>
 
 #include "thread.h"
 #include "util_likely.h"
@@ -93,7 +94,7 @@ namespace dxvk::this_thread {
   bool isInModuleDetachment() {
     using PFN_RtlDllShutdownInProgress = BOOLEAN (NTAPI *)();
 
-    static auto RtlDllShutdownInProgress = reinterpret_cast<PFN_RtlDllShutdownInProgress>(
+    static auto RtlDllShutdownInProgress = reinterpret_cast<PFN_RtlDllShutdownInProgress>( (void*)
       ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress"));
 
     return RtlDllShutdownInProgress();
@@ -123,3 +124,35 @@ namespace dxvk::this_thread {
 }
 
 #endif
+
+
+namespace dxvk {
+
+  void setThreadName(const char* name) {
+#ifdef _WIN32
+    using SetThreadDescriptionProc = HRESULT (WINAPI *) (HANDLE, PCWSTR);
+
+    static auto SetThreadDescription = reinterpret_cast<SetThreadDescriptionProc>( (void*)
+      ::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"));
+
+    if (SetThreadDescription) {
+      std::array<wchar_t, 16> wideName = { };
+
+      for (size_t i = 0; i < 15 && name[i]; ++i)
+        wideName[i] = static_cast<wchar_t>(name[i]);
+
+      SetThreadDescription(::GetCurrentThread(), wideName.data());
+    }
+#else
+    std::array<char, 16> posixName = {};
+    for (size_t i = 0; i < 15 && name[i]; ++i)
+      posixName[i] = name[i];
+#ifdef __APPLE__
+    ::pthread_setname_np(posixName.data());
+#else
+    ::pthread_setname_np(pthread_self(), posixName.data());
+#endif
+#endif
+  }
+
+}

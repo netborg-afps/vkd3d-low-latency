@@ -263,6 +263,8 @@ namespace pacer {
 
         void threadFunc() {
 
+            dxvk::setThreadName("vkd3d_top_of_pipe_timestamp");
+
             while (!m_stopped.load( std::memory_order_acquire)) {
 
                 QueueItem item;
