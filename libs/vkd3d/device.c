@@ -10632,6 +10632,7 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
     pacer_device_vk_procs.vkGetCalibratedTimestampsKHR = device->vk_procs.vkGetCalibratedTimestampsKHR;
     pacer_device_vk_procs.vkGetPhysicalDeviceCalibrateableTimeDomainsKHR
         = device->vk_procs.vkGetPhysicalDeviceCalibrateableTimeDomainsKHR;
+    pacer_device_vk_procs.vkWaitSemaphores = device->vk_procs.vkWaitSemaphores;
 
     device->pacer_device = pacer_create_device(&pacer_device_properties, &pacer_device_vk_procs);
 

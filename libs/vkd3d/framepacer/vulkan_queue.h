@@ -86,7 +86,7 @@ namespace pacer {
 
         }
 
-        void pushQueryPoolTopOfPipe( pacer_query_pool* queryPool, uint64_t submitId, bool pushIntoQueue ) {
+        void pushQueryPoolTopOfPipe( pacer_query_pool* queryPool, uint64_t submitId, VkSemaphore waitSemaphore, uint64_t waitValue, bool pushIntoQueue ) {
 
             if (unlikely(!pushIntoQueue)) {
                 // might trigger an out-of-order return log error, should be harmless / todo
@@ -94,7 +94,7 @@ namespace pacer {
                 return;
             }
             std::lock_guard<dxvk::mutex> lock(m_mutex);
-            m_queryQueue.push( {queryPool, submitId} );
+            m_queryQueue.push( {queryPool, submitId, waitSemaphore, waitValue} );
             m_cond.notify_one();
 
         }
@@ -281,6 +281,25 @@ namespace pacer {
                 }
 
                 assert( item.queryPool );
+
+                if (item.waitSemaphore && item.waitValue) {
+                    VkSemaphoreWaitInfo waitInfo {};
+                    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                    waitInfo.semaphoreCount = 1;
+                    waitInfo.pSemaphores = &item.waitSemaphore;
+                    waitInfo.pValues = &item.waitValue;
+
+                    VkResult res = m_device->m_vkProcs.vkWaitSemaphores(
+                        m_device->m_properties.vk_device,
+                        &waitInfo, UINT64_MAX);
+
+                    if (res) {
+                        ERR("Failed to wait for semaphore in top-of-pipe timestamp thread, vr %d.\n", res);
+                        freeQueryPoolTopOfPipe( item.queryPool );
+                        continue;
+                    }
+                }
+
                 uint64_t gpuTimestamp;
                 getQueryPoolResult( item.queryPool, &gpuTimestamp );
                 m_gpuExecutionStart[ item.submitId % NUM_SUBMITS ].store(gpuTimestamp);
@@ -313,6 +332,8 @@ namespace pacer {
         struct QueueItem {
             pacer_query_pool* queryPool;
             uint64_t submitId;
+            VkSemaphore waitSemaphore;
+            uint64_t waitValue;
         };
 
         std::atomic<bool> m_stopped = { false };
