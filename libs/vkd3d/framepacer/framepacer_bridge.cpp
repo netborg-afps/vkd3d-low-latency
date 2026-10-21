@@ -98,12 +98,13 @@ struct pacer_query_pool* pacer_vulkan_queue_alloc_query_pool_top_of_pipe( pacer_
     return VULKAN_QUEUE(vulkan_queue)->allocQueryPoolTopOfPipe();
 }
 
-void pacer_vulkan_queue_push_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue, struct pacer_query_pool* query_pool, uint64_t vulkan_submit_id, bool push_into_queue ) {
+void pacer_vulkan_queue_push_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue, struct pacer_query_pool* query_pool, uint64_t vulkan_submit_id, VkSemaphore wait_semaphore, uint64_t wait_value, bool push_into_queue ) {
     assert(vulkan_queue);
-    VULKAN_QUEUE(vulkan_queue)->pushQueryPoolTopOfPipe(query_pool, vulkan_submit_id, push_into_queue);
+    VULKAN_QUEUE(vulkan_queue)->pushQueryPoolTopOfPipe(query_pool, vulkan_submit_id, wait_semaphore, wait_value, push_into_queue);
 }
 
 void NvAPI_setSleepMode( pacer_device_handle handle, bool enable, UINT32 minimum_interval_us ) {
+    assert(handle);
     g_NvApi_sleepEnabled.store( enable, std::memory_order_release );
     DEVICE(handle)->m_activeType.store(
         enable ? Device::NVIDIA_Reflex : Device::WaitableDXGISwapchain,
@@ -113,8 +114,7 @@ void NvAPI_setSleepMode( pacer_device_handle handle, bool enable, UINT32 minimum
     g_sleepValueFilter.push(minimum_interval_us);
     uint32_t minInterval = g_sleepValueFilter.getMinInterval();
 
-    if (handle)
-        DEVICE(handle)->m_pacer->setFpsLimit(minInterval);
+    DEVICE(handle)->m_pacer->setFpsLimit(minInterval);
 }
 
 void NvAPI_setLatencyMarker( pacer_device_handle handle, uint64_t frameId, VkLatencyMarkerNV marker ) {

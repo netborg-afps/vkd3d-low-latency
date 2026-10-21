@@ -25454,6 +25454,7 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
     VkResult vr;
     HRESULT hr;
 
+    uint64_t query_pool_timeline_semaphore_wait_value;
     struct pacer_query_pool* query_pool;
     struct pacer_query_pool* query_pool_top_of_pipe;
     struct pacer_cmd_injection cmd_injection;
@@ -25461,6 +25462,7 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
 
     query_pool = NULL;
     query_pool_top_of_pipe = NULL;
+    query_pool_timeline_semaphore_wait_value = 0;
 
 
     TRACE("queue %p, command_list_count %u, command_lists %p.\n",
@@ -25541,6 +25543,8 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
     need_fallback_wait_semaphore = false;
     cmd_index = 0;
     is_first = true;
+
+    query_pool_timeline_semaphore_wait_value = vkd3d_queue->submission_timeline_count;
 
     /* The first command buffer will not be a fallback. There would be problems if it could be
      * since we want to submit initial transition commands as well. */
@@ -25794,6 +25798,8 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
             command_queue->pacer_queues.vulkan_queue,
             query_pool_top_of_pipe,
             exec->pacer_vulkan_submit_id,
+            vkd3d_queue->submission_timeline,
+            query_pool_timeline_semaphore_wait_value,
             vr == VK_SUCCESS && SUCCEEDED(hr));
     }
 }

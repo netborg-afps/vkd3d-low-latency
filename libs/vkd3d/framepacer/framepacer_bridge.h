@@ -28,6 +28,7 @@ struct pacer_device_vk_procs {
     PFN_vkCmdWriteTimestamp2 vkCmdWriteTimestamp2;
     PFN_vkGetCalibratedTimestampsKHR vkGetCalibratedTimestampsKHR;
     PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR vkGetPhysicalDeviceCalibrateableTimeDomainsKHR;
+    PFN_vkWaitSemaphores vkWaitSemaphores;
 };
 
 struct pacer_device_properties {
@@ -80,7 +81,7 @@ uint64_t pacer_vulkan_queue_notify_submit( pacer_vulkan_queue_handle vulkan_queu
 struct pacer_query_pool* pacer_vulkan_queue_alloc_query_pool( pacer_vulkan_queue_handle vulkan_queue );
 struct pacer_query_pool* pacer_vulkan_queue_alloc_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue );
 void pacer_vulkan_queue_free_query_pool( pacer_vulkan_queue_handle vulkan_queue,  struct pacer_query_pool* query_pool);
-void pacer_vulkan_queue_push_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue, struct pacer_query_pool* query_pool, uint64_t vulkan_submit_id, bool push_into_queue );
+void pacer_vulkan_queue_push_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue, struct pacer_query_pool* query_pool, uint64_t vulkan_submit_id, VkSemaphore wait_semaphore, uint64_t wait_value, bool push_into_queue );
 
 uint64_t pacer_notify_present( pacer_device_handle device, void* vkd3d_swapchain );
 void pacer_notify_aborted_present( pacer_device_handle device, void* vkd3d_swapchain );
