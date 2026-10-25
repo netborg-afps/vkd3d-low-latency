@@ -103,6 +103,11 @@ void pacer_vulkan_queue_push_query_pool_top_of_pipe( pacer_vulkan_queue_handle v
     VULKAN_QUEUE(vulkan_queue)->pushQueryPoolTopOfPipe(query_pool, vulkan_submit_id, wait_semaphore, wait_value, push_into_queue);
 }
 
+void pacer_vulkan_queue_push_query_pool_wait_semaphores(  pacer_vulkan_queue_handle vulkan_queue, const VkSemaphoreSubmitInfo* pWaitSemaphoreInfos, uint32_t waitSemaphoreInfoCount ) {
+    assert(vulkan_queue);
+    VULKAN_QUEUE(vulkan_queue)->pushQueryPoolWaitSemaphores( pWaitSemaphoreInfos, waitSemaphoreInfoCount );
+}
+
 void NvAPI_setSleepMode( pacer_device_handle handle, bool enable, UINT32 minimum_interval_us ) {
     assert(handle);
     g_NvApi_sleepEnabled.store( enable, std::memory_order_release );
