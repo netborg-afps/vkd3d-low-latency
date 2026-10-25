@@ -25659,6 +25659,12 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
             vkd3d_queue_timeline_trace_begin_execute_overhead(&command_queue->device->queue_timeline_trace, exec->timeline_cookie);
             d3d12_command_queue_gather_wait_semaphores_locked(command_queue, &submit_desc[0],
                   VKD3D_WAIT_SEMAPHORES_EXTERNAL | VKD3D_WAIT_SEMAPHORES_SERIALIZING);
+
+            if (command_queue->pacer_queues.vulkan_queue)
+                pacer_vulkan_queue_push_query_pool_wait_semaphores(
+                    command_queue->pacer_queues.vulkan_queue,
+                    submit_desc[0].pWaitSemaphoreInfos,
+                    submit_desc[0].waitSemaphoreInfoCount );
         }
 
         /* Prefer binary semaphore since timeline signal -> wait pair can cause scheduling bubbles.

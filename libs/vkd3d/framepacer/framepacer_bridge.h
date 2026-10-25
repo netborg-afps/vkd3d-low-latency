@@ -82,6 +82,7 @@ struct pacer_query_pool* pacer_vulkan_queue_alloc_query_pool( pacer_vulkan_queue
 struct pacer_query_pool* pacer_vulkan_queue_alloc_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue );
 void pacer_vulkan_queue_free_query_pool( pacer_vulkan_queue_handle vulkan_queue,  struct pacer_query_pool* query_pool);
 void pacer_vulkan_queue_push_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue, struct pacer_query_pool* query_pool, uint64_t vulkan_submit_id, VkSemaphore wait_semaphore, uint64_t wait_value, bool push_into_queue );
+void pacer_vulkan_queue_push_query_pool_wait_semaphores(  pacer_vulkan_queue_handle vulkan_queue, const VkSemaphoreSubmitInfo* pWaitSemaphoreInfos, uint32_t waitSemaphoreInfoCount );
 
 uint64_t pacer_notify_present( pacer_device_handle device, void* vkd3d_swapchain );
 void pacer_notify_aborted_present( pacer_device_handle device, void* vkd3d_swapchain );

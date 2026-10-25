@@ -6,6 +6,7 @@
 #include "util/sync/sync_ringbuffer_allocator.h"
 #include "util/util_time.h"
 #include "util/util_likely.h"
+#include "util/util_small_vector.h"
 #include <queue>
 
 namespace pacer {
@@ -91,12 +92,49 @@ namespace pacer {
             if (unlikely(!pushIntoQueue)) {
                 // might trigger an out-of-order return log error, should be harmless / todo
                 freeQueryPoolTopOfPipe( queryPool );
+                m_waitSemaphores.clear();
+                m_waitSemaphoreValues.clear();
                 return;
             }
+
+            m_waitSemaphores.push_back( waitSemaphore );
+            m_waitSemaphoreValues.push_back( waitValue );
             std::lock_guard<dxvk::mutex> lock(m_mutex);
-            m_queryQueue.push( {queryPool, submitId, waitSemaphore, waitValue} );
+            m_queryQueue.push( {queryPool, submitId, std::move(m_waitSemaphores), std::move(m_waitSemaphoreValues)} );
             m_cond.notify_one();
 
+        }
+
+        void pushQueryPoolWaitSemaphores( const VkSemaphoreSubmitInfo* pWaitSemaphoreInfos, uint32_t waitSemaphoreInfoCount ) {
+
+            m_waitSemaphores.clear();
+            m_waitSemaphoreValues.clear();
+
+            // copy relevant semaphore info into m_waitSemaphores/Values, ignoring stage masks
+
+            for (uint32_t i=0; i<waitSemaphoreInfoCount; ++i) {
+
+                VkSemaphore semaphore = pWaitSemaphoreInfos[i].semaphore;
+                uint64_t semaphoreValue = pWaitSemaphoreInfos[i].value;
+
+                uint64_t index = UINT64_MAX;
+                size_t size = m_waitSemaphores.size();
+                for (size_t j=0; j<size; ++j) {
+                    if (m_waitSemaphores[j] == semaphore) {
+                        index = j;
+                        break;
+                    }
+                }
+
+                if (index != UINT64_MAX) {
+                    m_waitSemaphoreValues[index] = std::max( semaphoreValue, m_waitSemaphoreValues[index] );
+                    continue;
+                }
+
+                m_waitSemaphores.push_back( semaphore );
+                m_waitSemaphoreValues.push_back( semaphoreValue );
+
+            }
         }
 
         void freeQueryPool(pacer_query_pool* queryPool) {
@@ -281,20 +319,21 @@ namespace pacer {
                 }
 
                 assert( item.queryPool );
+                assert( item.waitSemaphores.size() == item.waitSemaphoreValues.size() );
 
-                if (item.waitSemaphore && item.waitValue) {
+                if (!item.waitSemaphores.empty()) {
                     VkSemaphoreWaitInfo waitInfo {};
                     waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-                    waitInfo.semaphoreCount = 1;
-                    waitInfo.pSemaphores = &item.waitSemaphore;
-                    waitInfo.pValues = &item.waitValue;
+                    waitInfo.semaphoreCount = item.waitSemaphores.size();
+                    waitInfo.pSemaphores = item.waitSemaphores.data();
+                    waitInfo.pValues = item.waitSemaphoreValues.data();
 
                     VkResult res = m_device->m_vkProcs.vkWaitSemaphores(
                         m_device->m_properties.vk_device,
                         &waitInfo, UINT64_MAX);
 
                     if (res) {
-                        ERR("Failed to wait for semaphore in top-of-pipe timestamp thread, vr %d.\n", res);
+                        ERR("Failed to wait for semaphores in top-of-pipe timestamp thread, vr %d.\n", res);
                         freeQueryPoolTopOfPipe( item.queryPool );
                         continue;
                     }
@@ -327,13 +366,19 @@ namespace pacer {
         sync::RingbufferAllocator<pacer_query_pool, 256> m_queryPoolsTopOfPipe;
         sync::RingbufferAllocator<pacer_query_pool, 256> m_queryPoolsBottomOfPipe;
 
+        typedef dxvk::small_vector< VkSemaphore, 8 > semaphore_vector;
+        typedef dxvk::small_vector< uint64_t, 8 > semaphore_value_vector;
+
+        semaphore_vector m_waitSemaphores;
+        semaphore_value_vector m_waitSemaphoreValues;
+
         // threading for top of pipe timestamps
 
         struct QueueItem {
             pacer_query_pool* queryPool;
             uint64_t submitId;
-            VkSemaphore waitSemaphore;
-            uint64_t waitValue;
+            semaphore_vector waitSemaphores;
+            semaphore_value_vector waitSemaphoreValues;
         };
 
         std::atomic<bool> m_stopped = { false };
