@@ -6464,6 +6464,52 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_embedded_128_32
     }
 }
 
+static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_embedded_128_16_planar(d3d12_device_iface *iface,
+        UINT descriptor_count, const D3D12_CPU_DESCRIPTOR_HANDLE dst_descriptor_range_offset,
+        const D3D12_CPU_DESCRIPTOR_HANDLE src_descriptor_range_offset,
+        D3D12_DESCRIPTOR_HEAP_TYPE descriptor_heap_type)
+{
+    struct d3d12_device *device;
+    TRACE("iface %p, descriptor_count %u, dst_descriptor_range_offset %#zx, "
+          "src_descriptor_range_offset %#zx, descriptor_heap_type %#x.\n",
+            iface, descriptor_count, dst_descriptor_range_offset.ptr, src_descriptor_range_offset.ptr,
+            descriptor_heap_type);
+
+    if (VKD3D_EXPECT_TRUE(descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV))
+    {
+        d3d12_desc_copy_embedded_resource(
+                dst_descriptor_range_offset.ptr,
+                src_descriptor_range_offset.ptr,
+                128 * descriptor_count);
+    }
+    else if (descriptor_heap_type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
+    {
+        if (VKD3D_EXPECT_TRUE(descriptor_count == 1))
+        {
+            /* Expected path. */
+            vkd3d_memcpy_aligned_16_cached(
+                    (void *)dst_descriptor_range_offset.ptr,
+                    (const void *)src_descriptor_range_offset.ptr);
+        }
+        else
+        {
+            /* Rare path. */
+            vkd3d_memcpy_aligned_cached(
+                    (void *)dst_descriptor_range_offset.ptr,
+                    (const void *)src_descriptor_range_offset.ptr,
+                    16 * descriptor_count);
+        }
+    }
+    else
+    {
+        device = unsafe_impl_from_ID3D12Device(iface);
+        d3d12_device_copy_descriptors(device,
+                1, &dst_descriptor_range_offset, &descriptor_count,
+                1, &src_descriptor_range_offset, &descriptor_count,
+                descriptor_heap_type);
+    }
+}
+
 static void STDMETHODCALLTYPE d3d12_device_CopyDescriptorsSimple_embedded_generic(d3d12_device_iface *iface,
         UINT descriptor_count, const D3D12_CPU_DESCRIPTOR_HANDLE dst_descriptor_range_offset,
         const D3D12_CPU_DESCRIPTOR_HANDLE src_descriptor_range_offset,
@@ -8836,6 +8882,7 @@ VKD3D_DECLARE_D3D12_DEVICE_VARIANT(heap_64_16_packed, heap, embedded_64_16_packe
 VKD3D_DECLARE_D3D12_DEVICE_VARIANT(heap_32_16_planar, heap, embedded_32_16_planar); /* RDNA3+ */
 VKD3D_DECLARE_D3D12_DEVICE_VARIANT(heap_32_32_planar, heap, embedded_32_32_planar); /* NV */
 VKD3D_DECLARE_D3D12_DEVICE_VARIANT(heap_128_32_planar, heap, embedded_128_32_planar); /* Intel */
+VKD3D_DECLARE_D3D12_DEVICE_VARIANT(heap_128_16_planar, heap, embedded_128_16_planar); /* Turnip */
 VKD3D_DECLARE_D3D12_DEVICE_VARIANT(heap_generic, heap, embedded_generic);
 
 /* Descriptor buffer with embedded mutable */
@@ -9359,8 +9406,10 @@ static void d3d12_device_caps_init_feature_options3(struct d3d12_device *device)
      *
      * TIER_2 is most appropriate since it allows for fast path in certain situations and
      * fallback in some other cases.
-     * Turnip does not support multiviewGeom/Tess. This should not come up, so shove it under the rug for now. */
+     * Turnip does not support multiviewGeom/Tess. This should not come up, so shove it under the rug for now.
+     * At least one game requires the really awkward cases for multiview that we don't support yet. */
     options3->ViewInstancingTier =
+            !vkd3d_application_attempts_complex_multiview() &&
             device->device_info.vulkan_1_1_features.multiview &&
             device->device_info.vulkan_1_2_features.shaderOutputLayer &&
             device->device_info.vulkan_1_2_features.shaderOutputViewportIndex &&
@@ -10086,6 +10135,23 @@ static void vkd3d_init_shader_extensions(struct d3d12_device *device)
             device->vk_info.shader_extensions[device->vk_info.shader_extension_count++] =
                     VKD3D_SHADER_TARGET_EXTENSION_ASSUME_PER_COMPONENT_SSBO_ROBUSTNESS;
         }
+
+        if (device->device_info.properties2.properties.vendorID == VKD3D_VENDOR_ID_NVIDIA)
+        {
+            /* On other vendors, we follow the provided alignment, so it's the driver's job to deal with whatever we do.
+             * On NVIDIA, we skirt the rules and emit SSBOs with lower alignment than driver advertises.
+             * It becomes our job to ensure that we don't generate certain patterns in code
+             * that violate what the compiler assumes.
+             * With NV_raw_access_chains, all of this is irrelevant, since we emit proper alignment in the shader,
+             * but when capturing in e.g. RenderDoc we don't have the extension, so be conservative.
+             *
+             * This is sort of a "negative" extension, but it's the most convenient way to signal this.
+             *
+             * Include NVK in this. NVK also does similar hackery, and we don't want to risk problems.
+             */
+            device->vk_info.shader_extensions[device->vk_info.shader_extension_count++] =
+                    VKD3D_SHADER_TARGET_EXTENSION_SHADER_IMPLIED_SSBO_ALIGNMENT;
+        }
     }
 
     if (device->device_info.barycentric_features_khr.fragmentShaderBarycentric)
@@ -10398,6 +10464,14 @@ static void d3d12_device_replace_vtable(struct d3d12_device *device)
             /* Intel. If we can find a way to properly alias SSBO + Texel buffer and stuff UAV counter
              * somewhere, we can probably do 64_32. */
             device->ID3D12Device_iface.lpVtbl = &d3d12_device_vtbl_heap_128_32_planar;
+        }
+        else if (!(device->bindless_state.flags & VKD3D_BINDLESS_MUTABLE_EMBEDDED_PACKED_METADATA) &&
+                device->bindless_state.cbv_srv_uav_size == 128 &&
+                device->bindless_state.sampler_size == 16)
+        {
+            /* Turnip. If we can find a way to properly alias SSBO + Texel buffer and stuff UAV counter
+             * somewhere, we can probably do 64_16. */
+            device->ID3D12Device_iface.lpVtbl = &d3d12_device_vtbl_heap_128_16_planar;
         }
         else
         {

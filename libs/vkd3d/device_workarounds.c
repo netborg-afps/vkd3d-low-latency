@@ -34,7 +34,8 @@ enum vkd3d_application_feature_override
     VKD3D_APPLICATION_FEATURE_RDNA1_COMPATIBILITY = 1 << 5,
     VKD3D_APPLICATION_FEATURE_ASSUMES_STRICT_BYTE_ADDRESS_WRAP = 1 << 6,
     VKD3D_APPLICATION_FEATURE_BROKEN_WAVE128_REQUESTS = 1 << 7,
-    VKD3D_APPLICATION_FEATURE_REQUIRES_MIN16_DENORMS = 1 << 8
+    VKD3D_APPLICATION_FEATURE_REQUIRES_MIN16_DENORMS = 1 << 8,
+    VKD3D_APPLICATION_FEATURE_ATTEMPTS_COMPLEX_MULTIVIEW = 1 << 9,
 };
 
 static enum vkd3d_application_feature_override vkd3d_application_feature_override;
@@ -99,6 +100,8 @@ static const struct vkd3d_instance_application_meta application_override[] = {
     /* PARANOID (946920). Similar concern with DXR. Add default UE configs. Also requires non-native FP16 somehow. */
     { VKD3D_STRING_COMPARE_EXACT, "Paranoid-Win64-Shipping.exe", VKD3D_CONFIG_FLAG_INIT_STATIC(.SMALL_VRAM_REBAR = 1, .NO_STAGGERED_SUBMIT = 1), VKD3D_CONFIG_FLAGS_NONE,
             VKD3D_APPLICATION_FEATURE_NO_DEFAULT_DXR_ON_DECK_AND_FRAME },
+    /*Tracing Decay (1973370). Similar concern with DXR as PARANOID. */
+    { VKD3D_STRING_COMPARE_EXACT, "TracingDecay-Win64-Shipping.exe", VKD3D_CONFIG_FLAGS_NONE, VKD3D_CONFIG_FLAGS_NONE, VKD3D_APPLICATION_FEATURE_NO_DEFAULT_DXR_ON_DECK_AND_FRAME },
     /* Lost Judgment (2058190) */
     { VKD3D_STRING_COMPARE_EXACT, "LostJudgment.exe", VKD3D_CONFIG_FLAG_STATIC(FORCE_INITIAL_TRANSITION) },
     /* Marvel's Spider-Man Remastered (1817070). DCC stores causes glitches when RT is enabled with RADV. */
@@ -219,6 +222,10 @@ static const struct vkd3d_instance_application_meta application_override[] = {
      * template makes those ExecuteIndirect draws disappear, and the game handles a failed
      * CreateCommandSignature by issuing the draws from the CPU instead. */
     { VKD3D_STRING_COMPARE_EXACT, "teardown.exe", VKD3D_CONFIG_FLAG_INIT_STATIC(.FAIL_UNSUPPORTED_STATE_TEMPLATE = 1) },
+    /* NBA 2K27 (4356430) */
+    { VKD3D_STRING_COMPARE_EXACT, "NBA2K27.exe", VKD3D_CONFIG_FLAG_INIT_STATIC(.DESCRIPTOR_HEAP = 1) },
+    /* Space Engineers 2 (1133870) */
+    { VKD3D_STRING_COMPARE_EXACT, "SpaceEngineers2.exe", VKD3D_CONFIG_FLAGS_NONE, VKD3D_CONFIG_FLAGS_NONE, VKD3D_APPLICATION_FEATURE_ATTEMPTS_COMPLEX_MULTIVIEW },
     { VKD3D_STRING_COMPARE_NEVER, NULL },
 };
 
@@ -237,6 +244,8 @@ static const struct vkd3d_shader_quirk_hash ue4_hashes[] = {
     { NULL, 0xa48ead2a618e12d8ull, VKD3D_SHADER_QUIRK_FORCE_EXPLICIT_LOD_IN_CONTROL_FLOW },
     { NULL, 0xebfd864995d3fc07ull, VKD3D_SHADER_QUIRK_FORCE_EXPLICIT_LOD_IN_CONTROL_FLOW },
     { NULL, 0xcca7b582db60199cull, VKD3D_SHADER_QUIRK_FORCE_EXPLICIT_LOD_IN_CONTROL_FLOW },
+    /* RT glitches on AMD in multiple unrelated UE4 games are resolved with extra barriers added. */
+    { NULL, 0x80070f7c22fa9175ull, VKD3D_SHADER_QUIRK_FORCE_PRE_COMPUTE_BARRIER },
 };
 
 static const struct vkd3d_shader_quirk_info ue4_quirks = {
@@ -602,6 +611,18 @@ static const struct vkd3d_shader_quirk_info half_sword_quirks = {
     NULL, 0, VKD3D_SHADER_QUIRK_CLAMP_WAVE_SIZE_TO_THREAD_GROUP32,
 };
 
+static const struct vkd3d_shader_quirk_info arc_raiders_quirks = {
+    NULL, 0, VKD3D_SHADER_QUIRK_CLAMP_WAVE_SIZE_TO_THREAD_GROUP32,
+};
+
+static const struct vkd3d_shader_quirk_hash ac8_hashes[] = {
+    { "SkyTraceCS", 0, VKD3D_SHADER_QUIRK_FORCE_DENORM_LEGACY_FP16_CONVERSIONS },
+};
+
+static const struct vkd3d_shader_quirk_info ac8_quirks = {
+    ac8_hashes, ARRAY_SIZE(ac8_hashes), 0,
+};
+
 static const struct vkd3d_shader_quirk_meta application_shader_quirks[] = {
     /* F1 2020 (1080110) */
     { VKD3D_STRING_COMPARE_EXACT, "F1_2020_dx12.exe", &f1_2019_2020_quirks },
@@ -710,6 +731,10 @@ static const struct vkd3d_shader_quirk_meta application_shader_quirks[] = {
     { VKD3D_STRING_COMPARE_APPID, "1245620", &elden_ring_quirks },
     /* Half Sword (2397300) */
     { VKD3D_STRING_COMPARE_EXACT, "HalfSwordUE5-Win64-Shipping.exe", &half_sword_quirks },
+    /* ARC Raiders (1808500) */
+    { VKD3D_STRING_COMPARE_STARTS_WITH, "PioneerGame", &arc_raiders_quirks },
+    /* ACE COMBAT 8 (2288340) */
+    { VKD3D_STRING_COMPARE_APPID, "2288340", &ac8_quirks },
     /* Unreal Engine 4 */
     { VKD3D_STRING_COMPARE_ENDS_WITH, "-Shipping.exe", &ue4_quirks },
     { VKD3D_STRING_COMPARE_NEVER, NULL, NULL },
@@ -936,6 +961,7 @@ void vkd3d_instance_apply_global_shader_quirks(void)
     static const struct override overrides[] =
     {
         { VKD3D_CONFIG_FLAG_STATIC(FORCE_NO_INVARIANT_POSITION), VKD3D_SHADER_QUIRK_INVARIANT_POSITION, true },
+        { VKD3D_CONFIG_FLAG_STATIC(DESCRIPTOR_HEAP_ROBUSTNESS), VKD3D_SHADER_QUIRK_DESCRIPTOR_HEAP_ROBUSTNESS, false },
     };
     bool eq_test;
     unsigned int i;
@@ -1047,7 +1073,9 @@ void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_device_i
      * The 16 byte offset is a lie, as that is only actually required when we
      * use vectorized load-stores. When we emit vectorized load-store ops,
      * the storage buffer must be aligned properly, so this is fine in practice
-     * and is a nice speed boost. */
+     * and is a nice speed boost.
+     * See vkd3d_init_shader_extensions. Need to add VKD3D_SHADER_TARGET_EXTENSION_SHADER_IMPLIED_SSBO_ALIGNMENT.
+     */
     if (info->vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
         info->properties2.properties.limits.minStorageBufferOffsetAlignment = 4;
 
@@ -1101,10 +1129,9 @@ void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_device_i
             device->device_info.present_timing_features.presentAtRelativeTime = VK_FALSE;
         }
 
-        if (!vkd3d_debug_control_is_test_suite() &&
-            info->vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
+        if (info->vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
         {
-            /* Float controls2 is broken where we need it to work. Keep using bad QuantizeToFP16 path
+            /* Float controls2 is broken where we need it to work. Keep using slow quantize path
              * until driver works. */
             WARN("Disabling shader_float_controls2 on NV drivers due to buggy implementation.\n");
             device->device_info.float_controls2_features.shaderFloatControls2 = VK_FALSE;
@@ -1178,6 +1205,11 @@ bool vkd3d_application_has_broken_wave128(void)
 bool vkd3d_application_requires_min16_denorms(void)
 {
     return (vkd3d_application_feature_override & VKD3D_APPLICATION_FEATURE_REQUIRES_MIN16_DENORMS) != 0;
+}
+
+bool vkd3d_application_attempts_complex_multiview(void)
+{
+    return (vkd3d_application_feature_override & VKD3D_APPLICATION_FEATURE_ATTEMPTS_COMPLEX_MULTIVIEW) != 0;
 }
 
 VKD3D_DEBUG_CONTROL_BEHAVIOR_FLAGS vkd3d_debug_control_get_behavior_flags(void);

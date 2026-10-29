@@ -271,6 +271,54 @@ static bool vkd3d_memory_transfer_queue_wait_semaphore(struct vkd3d_memory_trans
     return new_value >= wait_value;
 }
 
+static bool vkd3d_memory_transfer_queue_transfer_overlaps(const struct vkd3d_memory_transfer_info *first, const struct vkd3d_memory_transfer_info *next)
+{
+    const struct vkd3d_memory_transfer_info *curr;
+    VkOffset3D curr_lo, curr_hi, next_lo, next_hi;
+
+    for (curr = first; curr != next; curr++)
+    {
+        if (curr->op != VKD3D_MEMORY_TRANSFER_OP_WRITE_SUBRESOURCE &&
+                next->op != VKD3D_MEMORY_TRANSFER_OP_WRITE_SUBRESOURCE)
+        {
+            /* Check overlapping buffer writes */
+            if (curr->vk_buffer == next->vk_buffer &&
+                    curr->vk_buffer_offset + curr->vk_buffer_size > next->vk_buffer_offset &&
+                    next->vk_buffer_offset + next->vk_buffer_size > curr->vk_buffer_offset)
+                return true;
+        }
+        else if (curr->op == VKD3D_MEMORY_TRANSFER_OP_WRITE_SUBRESOURCE &&
+                next->op == VKD3D_MEMORY_TRANSFER_OP_WRITE_SUBRESOURCE)
+        {
+            /* For WRITE_SUBRESOURCE, check for overlapping image writes */
+            if (curr->resource == next->resource && curr->subresource_idx == next->subresource_idx)
+            {
+                curr_lo = curr->offset;
+                curr_hi.x = curr_lo.x + (int32_t)curr->extent.width;
+                curr_hi.y = curr_lo.y + (int32_t)curr->extent.height;
+                curr_hi.z = curr_lo.z + (int32_t)curr->extent.depth;
+
+                next_lo = next->offset;
+                next_hi.x = next_lo.x + (int32_t)next->extent.width;
+                next_hi.y = next_lo.y + (int32_t)next->extent.height;
+                next_hi.z = next_lo.z + (int32_t)next->extent.depth;
+
+                if (curr_lo.x < next_hi.x && curr_lo.y < next_hi.y && curr_lo.z < next_hi.z &&
+                        curr_hi.x > next_lo.x && curr_hi.y > next_lo.y && curr_hi.z > next_lo.z)
+                    return true;
+            }
+        }
+        else
+        {
+            /* We have no reliable way to check overlap between a clear and
+             * WRITE_SUBRESOURCE, just assume a hazard by default. */
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static HRESULT vkd3d_memory_transfer_queue_flush_locked(struct vkd3d_memory_transfer_queue *queue)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &queue->device->vk_procs;
@@ -279,6 +327,7 @@ static HRESULT vkd3d_memory_transfer_queue_flush_locked(struct vkd3d_memory_tran
     VkImageSubresourceLayers vk_subresource_layers;
     VkCopyBufferToImageInfo2 buffer_to_image_copy;
     VkCommandBufferSubmitInfo cmd_buffer_info;
+    VkDependencyInfo dep_barrier, dep_image;
     VkCommandBufferBeginInfo begin_info;
     VkImageMemoryBarrier2 image_barrier;
     VkImageSubresource vk_subresource;
@@ -286,13 +335,12 @@ static HRESULT vkd3d_memory_transfer_queue_flush_locked(struct vkd3d_memory_tran
     VkCommandBuffer vk_cmd_buffer;
     VkMemoryBarrier2 vk_barrier;
     VkDeviceSize buffer_offset;
-    VkDependencyInfo dep_info;
     VkSubmitInfo2 submit_info;
+    size_t i, last_barrier;
     VkExtent3D mip_extent;
     bool need_transition;
     VkQueue vk_queue;
     VkResult vr;
-    size_t i;
 
     if (!queue->transfer_count)
         return S_OK;
@@ -332,12 +380,36 @@ static HRESULT vkd3d_memory_transfer_queue_flush_locked(struct vkd3d_memory_tran
         return hresult_from_vk_result(vr);
     }
 
-    memset(&dep_info, 0, sizeof(dep_info));
-    dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    memset(&dep_image, 0, sizeof(dep_image));
+    dep_image.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep_image.imageMemoryBarrierCount = 1;
+    dep_image.pImageMemoryBarriers = &image_barrier;
+
+    memset(&dep_barrier, 0, sizeof(dep_barrier));
+    dep_barrier.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep_barrier.memoryBarrierCount = 1;
+    dep_barrier.pMemoryBarriers = &vk_barrier;
+
+    memset(&vk_barrier, 0, sizeof(vk_barrier));
+    vk_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    vk_barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    vk_barrier.dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+
+    last_barrier = 0;
 
     for (i = 0; i < queue->transfer_count; i++)
     {
         const struct vkd3d_memory_transfer_info *transfer = &queue->transfers[i];
+
+        if (vkd3d_memory_transfer_queue_transfer_overlaps(&queue->transfers[last_barrier], transfer))
+        {
+            VK_CALL(vkCmdPipelineBarrier2(vk_cmd_buffer, &dep_barrier));
+
+            vk_barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+            vk_barrier.srcAccessMask = VK_ACCESS_2_NONE;
+
+            last_barrier = i;
+        }
 
         switch (transfer->op)
         {
@@ -352,21 +424,8 @@ static HRESULT vkd3d_memory_transfer_queue_flush_locked(struct vkd3d_memory_tran
                             transfer->op == VKD3D_MEMORY_TRANSFER_OP_DEBUG_FILL_ALLOCATION ? transfer->fill_value : 0));
                 }
 
-                if (transfer->op == VKD3D_MEMORY_TRANSFER_OP_DEBUG_FILL_ALLOCATION)
-                {
-                    /* If a full allocation is debug-cleared followed by a normal zero-vram clear we need barrier. */
-                    dep_info.imageMemoryBarrierCount = 0;
-                    dep_info.memoryBarrierCount = 1;
-                    dep_info.pMemoryBarriers = &vk_barrier;
-
-                    memset(&vk_barrier, 0, sizeof(vk_barrier));
-                    vk_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-                    vk_barrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
-                    vk_barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-                    vk_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-                    vk_barrier.dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
-                    VK_CALL(vkCmdPipelineBarrier2(vk_cmd_buffer, &dep_info));
-                }
+                vk_barrier.srcStageMask |= VK_PIPELINE_STAGE_2_CLEAR_BIT;
+                vk_barrier.srcAccessMask |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
                 break;
 
             case VKD3D_MEMORY_TRANSFER_OP_WRITE_SUBRESOURCE:
@@ -377,13 +436,10 @@ static HRESULT vkd3d_memory_transfer_queue_flush_locked(struct vkd3d_memory_tran
 
                 if (need_transition && vk_image_memory_barrier_for_initial_transition(transfer->resource, &image_barrier))
                 {
-                    dep_info.memoryBarrierCount = 0;
-                    dep_info.imageMemoryBarrierCount = 1;
-                    dep_info.pImageMemoryBarriers = &image_barrier;
                     image_barrier.dstStageMask |= VK_PIPELINE_STAGE_2_COPY_BIT;
                     image_barrier.dstAccessMask |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
 
-                    VK_CALL(vkCmdPipelineBarrier2(vk_cmd_buffer, &dep_info));
+                    VK_CALL(vkCmdPipelineBarrier2(vk_cmd_buffer, &dep_image));
                 }
 
                 vk_subresource = d3d12_resource_get_vk_subresource(transfer->resource, transfer->subresource_idx, false);
@@ -413,15 +469,24 @@ static HRESULT vkd3d_memory_transfer_queue_flush_locked(struct vkd3d_memory_tran
 
                 VK_CALL(vkCmdCopyBufferToImage2(vk_cmd_buffer, &buffer_to_image_copy));
 
+                vk_barrier.srcStageMask |= VK_PIPELINE_STAGE_2_COPY_BIT;
+                vk_barrier.srcAccessMask |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
+
                 vkd3d_memory_transfer_queue_track_resource_locked(queue,
                         transfer->resource, queue->next_signal_value);
                 break;
 
             case VKD3D_MEMORY_TRANSFER_OP_BUILD_NULL_RTAS:
                 vkd3d_build_null_rtas_va(queue->device, vk_cmd_buffer);
+
+                vk_barrier.srcStageMask |= VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+                vk_barrier.srcAccessMask |= VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
                 break;
         }
     }
+
+    if (vk_barrier.srcStageMask)
+        VK_CALL(vkCmdPipelineBarrier2(vk_cmd_buffer, &dep_barrier));
 
     if ((vr = VK_CALL(vkEndCommandBuffer(vk_cmd_buffer))) < 0)
     {
@@ -892,20 +957,32 @@ void vkd3d_free_device_memory(struct d3d12_device *device, const struct vkd3d_de
         vkd3d_report_memory_budget(device);
 }
 
+static bool vkd3d_memory_info_type_mask_covers_multiple_memory_heaps(
+        const struct VkPhysicalDeviceMemoryProperties *props, uint32_t type_mask)
+{
+    uint32_t heap_mask = 0;
+    if (!type_mask)
+        return false;
+    while (type_mask)
+        heap_mask |= 1u << props->memoryTypes[vkd3d_bitmask_iter32(&type_mask)].heapIndex;
+    return !!(heap_mask & (heap_mask - 1u));
+}
+
 static HRESULT vkd3d_try_allocate_device_memory(struct d3d12_device *device,
         VkDeviceSize size, VkMemoryPropertyFlags type_flags, const uint32_t base_type_mask,
         void *pNext, bool respect_budget, struct vkd3d_device_memory_allocation *allocation)
 {
     const VkPhysicalDeviceMemoryProperties *memory_props = &device->memory_properties;
-    uint32_t type_mask, device_local_mask, candidate_mask, heap_index;
+    uint32_t type_mask, device_local_mask, host_visible_mask, candidate_mask, heap_index;
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     struct vkd3d_memory_info *memory_info = &device->memory_info;
     VkDeviceSize *type_current, heap_size;
     VkMemoryAllocateInfo allocate_info;
-    bool rebar_budget;
+    bool rebar_budget, can_fallback_sysmem;
     VkResult vr;
 
     device_local_mask = 0u;
+    host_visible_mask = 0u;
     candidate_mask = 0u;
 
     type_mask = base_type_mask;
@@ -920,6 +997,8 @@ static HRESULT vkd3d_try_allocate_device_memory(struct d3d12_device *device,
 
             if (memory_props->memoryTypes[type_index].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
                 device_local_mask |= 1u << type_index;
+            if (memory_props->memoryTypes[type_index].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+                host_visible_mask |= 1u << type_index;
         }
     }
 
@@ -929,12 +1008,12 @@ static HRESULT vkd3d_try_allocate_device_memory(struct d3d12_device *device,
     if (!(type_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && (candidate_mask != device_local_mask))
         candidate_mask &= ~device_local_mask;
 
-    allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocate_info.pNext = pNext;
-    allocate_info.allocationSize = size;
-    allocate_info.memoryTypeIndex = vkd3d_bitmask_tzcnt32(candidate_mask);
+    /* If host-visible memory is not explicitly requested and the candidate mask covers device-only memory,
+     * ensure that we don't accidentally use HVV / PCI-e BAR for pure device-local allocations. */
+    if (!(type_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && (candidate_mask != host_visible_mask))
+        candidate_mask &= ~host_visible_mask;
 
-    if (allocate_info.memoryTypeIndex >= memory_props->memoryTypeCount)
+    if (!candidate_mask)
     {
         /* We consider CACHED optional here if we cannot find a memory type that supports it.
          * Failing to allocate CACHED is not a scenario where we would fall back. */
@@ -961,24 +1040,24 @@ static HRESULT vkd3d_try_allocate_device_memory(struct d3d12_device *device,
         }
     }
 
-    /* Once we have found a suitable memory type, only attempt to allocate that memory type.
-     * This avoids some problems by design:
-     * - If we want to allocate DEVICE_LOCAL memory, we don't try to fallback to PCI-e BAR memory by mistake.
-     * - If we want to allocate system memory, we don't try to fallback to PCI-e BAR memory by mistake.
-     * - There is no reasonable scenario where we can expect one memory type to fail, and another memory type
-     *   with more memory property bits set to pass. This makes use of the rule where memory types which are a super-set
-     *   of another must have a larger type index.
-     * - We will only attempt to allocate PCI-e BAR memory if DEVICE_LOCAL | HOST_VISIBLE is set, otherwise we
-     *   will find a candidate memory type which is either DEVICE_LOCAL or HOST_VISIBLE before we find a PCI-e BAR type.
-     * - For iGPU where everything is DEVICE_LOCAL | HOST_VISIBLE, we will just find that memory type first anyways,
-     *   but there we don't have anything to worry about w.r.t. PCI-e BAR.
-     */
+    can_fallback_sysmem = vkd3d_memory_info_type_mask_covers_multiple_memory_heaps(&device->memory_properties, base_type_mask);
 
-    /* Budgets only apply to PCI-e BAR */
-    rebar_budget = !!(memory_info->rebar_budget_mask & (1u << allocate_info.memoryTypeIndex));
-    if (rebar_budget)
+    allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate_info.pNext = pNext;
+    allocate_info.allocationSize = size;
+    vr = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+    /* Try candidate memory types in priority order. If one fails (e.g. uncached system memory
+     * fails on large contiguous allocation, or ReBAR budget is exceeded), fall back to subsequent
+     * compatible memory types in candidate_mask. */
+    while (candidate_mask)
     {
-        if (respect_budget)
+        uint32_t candidate_type_index = vkd3d_bitmask_iter32(&candidate_mask);
+        allocate_info.memoryTypeIndex = candidate_type_index;
+
+        /* Budgets only apply to PCI-e BAR */
+        rebar_budget = !!(memory_info->rebar_budget_mask & (1u << candidate_type_index));
+        if (rebar_budget && respect_budget)
         {
             pthread_mutex_lock(&memory_info->budget_lock);
             if (memory_info->rebar_current + size > memory_info->rebar_budget)
@@ -986,43 +1065,57 @@ static HRESULT vkd3d_try_allocate_device_memory(struct d3d12_device *device,
                 if (VKD3D_CONFIG_FLAG_IS_SET(LOG_MEMORY_BUDGET))
                 {
                     INFO("Attempting to allocate from memory type %u, but exceeding fixed ReBAR budget: %"PRIu64" + %"PRIu64" > %"PRIu64".\n",
-                            allocate_info.memoryTypeIndex, memory_info->rebar_current, size, memory_info->rebar_budget);
+                            candidate_type_index, memory_info->rebar_current, size, memory_info->rebar_budget);
                 }
                 pthread_mutex_unlock(&memory_info->budget_lock);
-                return E_OUTOFMEMORY;
+                continue;
             }
         }
-    }
 
-    /* Don't create device-local allocations that are unlikely to fully fit into VRAM
-     * if a fallback to system memory is possible. On Nvidia, creating a device-local
-     * allocation larger than VRAM may succeed, but causes various problems and will
-     * end up in system memory anyway. */
-    if ((type_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && candidate_mask != device_local_mask)
-    {
-        heap_index = device->memory_properties.memoryTypes[allocate_info.memoryTypeIndex].heapIndex;
-
-        heap_size = device->memory_properties.memoryHeaps[heap_index].size;
-        heap_size -= heap_size / 8u;
-
-        if (allocate_info.allocationSize > heap_size)
+        /* Don't create device-local allocations that are unlikely to fully fit into VRAM
+         * if a fallback to system memory is possible. On Nvidia, creating a device-local
+         * allocation larger than VRAM may succeed, but causes various problems and will
+         * end up in system memory anyway. */
+        if ((type_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && can_fallback_sysmem)
         {
-            ERR("Allocation size %"PRIu64" exceeds maximum allocation size on heap %u (%"PRIu64").\n", allocate_info.allocationSize, heap_index, heap_size);
-            return E_OUTOFMEMORY;
+            heap_index = device->memory_properties.memoryTypes[candidate_type_index].heapIndex;
+
+            heap_size = device->memory_properties.memoryHeaps[heap_index].size;
+            heap_size -= heap_size / 8u;
+
+            if (allocate_info.allocationSize > heap_size)
+            {
+                if (rebar_budget && respect_budget)
+                    pthread_mutex_unlock(&memory_info->budget_lock);
+                ERR("Allocation size %"PRIu64" exceeds maximum allocation size on heap %u (%"PRIu64").\n",
+                        allocate_info.allocationSize, heap_index, heap_size);
+                continue;
+            }
         }
+
+        /* Not a hard limit, but may fail at a driver level */
+        if (allocate_info.allocationSize > device->device_info.vulkan_1_1_properties.maxMemoryAllocationSize)
+        {
+            WARN("Allocation size %"PRIu64" exceeds maxMemoryAllocationSize of %"PRIu64".\n",
+                    allocate_info.allocationSize, device->device_info.vulkan_1_1_properties.maxMemoryAllocationSize);
+        }
+
+        /* In case we get address binding callbacks, ensure driver knows it's not a sparse bind that happens async. */
+        vkd3d_address_binding_tracker_mark_user_thread();
+
+        vr = VK_CALL(vkAllocateMemory(device->vk_device, &allocate_info, NULL, &allocation->vk_memory));
+        if (vr == VK_SUCCESS)
+            break;
+
+        if (rebar_budget && respect_budget)
+            pthread_mutex_unlock(&memory_info->budget_lock);
+
+        WARN("Failed to allocate %"PRIu64" bytes on memory type %u, vr %d.\n",
+                size, candidate_type_index, vr);
     }
 
-    /* Not a hard limit, but may fail at a driver level */
-    if (allocate_info.allocationSize > device->device_info.vulkan_1_1_properties.maxMemoryAllocationSize)
-    {
-        WARN("Allocation size %"PRIu64" exceeds maxMemoryAllocationSize of %"PRIu64".\n",
-                allocate_info.allocationSize, device->device_info.vulkan_1_1_properties.maxMemoryAllocationSize);
-    }
-
-    /* In case we get address binding callbacks, ensure driver knows it's not a sparse bind that happens async. */
-    vkd3d_address_binding_tracker_mark_user_thread();
-
-    vr = VK_CALL(vkAllocateMemory(device->vk_device, &allocate_info, NULL, &allocation->vk_memory));
+    if (vr != VK_SUCCESS)
+        return E_OUTOFMEMORY;
 
     if (vr == VK_SUCCESS)
     {
@@ -1081,17 +1174,6 @@ static HRESULT vkd3d_try_allocate_device_memory(struct d3d12_device *device,
     allocation->vk_memory_type = allocate_info.memoryTypeIndex;
     allocation->size = size;
     return S_OK;
-}
-
-static bool vkd3d_memory_info_type_mask_covers_multiple_memory_heaps(
-        const struct VkPhysicalDeviceMemoryProperties *props, uint32_t type_mask)
-{
-    uint32_t heap_mask = 0;
-    if (!type_mask)
-        return false;
-    while (type_mask)
-        heap_mask |= 1u << props->memoryTypes[vkd3d_bitmask_iter32(&type_mask)].heapIndex;
-    return !!(heap_mask & (heap_mask - 1u));
 }
 
 HRESULT vkd3d_allocate_device_memory(struct d3d12_device *device,
