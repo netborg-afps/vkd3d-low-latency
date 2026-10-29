@@ -31,7 +31,7 @@ namespace pacer {
 
         void sleepUntil( const TimePoint& t ) {
 
-            constexpr bool threadedSleep = true;
+            constexpr bool threadedSleep = false;
             if constexpr (!threadedSleep) {
                 dxvk::Sleep::sleepUntil(dxvk::high_resolution_clock::now(), t);
                 return;
