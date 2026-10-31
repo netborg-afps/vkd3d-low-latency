@@ -4,10 +4,16 @@
 #include <string>
 #include <stdint.h>
 
+extern "C" {
+#include "vkd3d_native_sync_handle.h"
+}
+
 namespace pacer {
 
     FramePacer::FramePacer( Device* device, uint64_t firstFrameId )
     : m_device(device), m_waitableDxgiSwapchain( device, m_latencyMarkers, m_frameSync,
+        [this](uint64_t frameId, time_point t) { this->sleep(frameId, t); } ),
+        m_waitMarkerless( device, m_latencyMarkers, m_frameSync,
         [this](uint64_t frameId, time_point t) { this->sleep(frameId, t); } ) {
         // We'll default to LOW_LATENCY, which generally provides the best "input lag"
         // along with time consistency and often appears the smoothest too.
@@ -61,9 +67,16 @@ namespace pacer {
             break;
         }
 
-        m_frameSync.cpuFinished   = firstFrameId-1;
-        m_frameSync.gpuFinished   = firstFrameId-1;
-        m_frameSync.frameFinished = firstFrameId-1;
+        m_frameSync.cpuStarted     = firstFrameId-1;
+        m_frameSync.cpuFinished    = firstFrameId-1;
+        m_frameSync.gpuFinished    = firstFrameId-1;
+        m_frameSync.frameFinished  = firstFrameId-1;
+
+        vkd3d_native_pacer_sync_handle_create(
+            1, 3,
+            &m_waitMarkerlessHandle);
+
+        m_isMarkerless.store( true, std::memory_order_release );
 
     }
 
@@ -72,6 +85,8 @@ namespace pacer {
 
         delete m_presentationStats.load();
         delete m_gpuBufferStats.load();
+
+        vkd3d_native_sync_handle_destroy(m_waitMarkerlessHandle);
 
     }
 

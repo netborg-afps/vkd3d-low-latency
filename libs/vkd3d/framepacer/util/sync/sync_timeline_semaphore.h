@@ -38,6 +38,14 @@ namespace pacer {
             return res;
         }
 
+        bool exchange( uint64_t value ) {
+            uint64_t res = m_value.exchange(value, std::memory_order_acq_rel);
+            if (res == value)
+                return false;
+            WakeByAddressAll(&m_value);
+            return true;
+        }
+
         uint64_t operator=( uint64_t value ) {
             signal( value );
             return value;

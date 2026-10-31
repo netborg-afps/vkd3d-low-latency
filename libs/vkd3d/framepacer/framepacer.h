@@ -81,16 +81,34 @@ namespace pacer {
             return cpuId - externalId;
         }
 
+        void checkForCpuStart() {
+
+            if (m_device->m_activeType.load(std::memory_order_relaxed) != Device::AMD_AntiLag2)
+                return;
+
+            uint64_t curCpu = m_frameSync.cpuFinished + 1;
+            if (likely(m_frameSync.cpuStarted >= curCpu))
+                return;
+
+            if (likely(!m_frameSync.cpuStarted.exchange(curCpu))) {
+                return;
+            }
+
+//            m_isMarkerless.store( true, std::memory_order_release );
+            m_waitMarkerless.alternativeSleep( &m_waitMarkerlessHandle );
+
+        }
+
         void finishCpu() {
             uint64_t cpuId = 1 + m_frameSync.cpuFinished++;
 
             uint64_t newId = cpuId + 1;
             m_frameMapping.registerMapping( newId, 0 );
             LatencyMarkers* m = m_latencyMarkers.getMarkers( cpuId );
-            LatencyMarkers* m_next = m_latencyMarkers.getMarkers( newId+1 );
+            LatencyMarkers* m_next = m_latencyMarkers.getMarkers( newId+2 );
             *m_next = LatencyMarkers {};
 
-            _INFO( "reset markers for frame %" PRIu64 " \n", newId+1 );
+            _INFO( "reset markers for frame %" PRIu64 " \n", newId+2 );
 
             m->cpuFinished = high_resolution_clock::now();
         }
@@ -121,7 +139,7 @@ namespace pacer {
             }
 
             if (m->start == time_point{}) {
-                _INFO( "m->start not set, skipping frame analysis \n" );
+                _INFO( "m->start not set for frame %" PRIu64 ", skipping frame analysis \n", gpuId );
                 return;
             }
 
@@ -235,7 +253,11 @@ namespace pacer {
         LatencyMarkersStorage m_latencyMarkers;
         FrameMapping m_frameMapping;
         FrameSync m_frameSync;
-        WaitableDXGISwapchain m_waitableDxgiSwapchain;
+        WaitableDXGISwapchain m_waitableDxgiSwapchain; // game does have waitable object
+
+        std::atomic<bool> m_isMarkerless = { false };
+        WaitableDXGISwapchain m_waitMarkerless;
+        vkd3d_native_sync_handle m_waitMarkerlessHandle;
 
     private:
 

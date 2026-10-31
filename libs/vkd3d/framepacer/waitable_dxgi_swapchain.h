@@ -73,6 +73,27 @@ namespace pacer {
 
         }
 
+
+        void alternativeSleep( vkd3d_native_sync_handle* latencyEvent ) {
+
+            if (latencyEvent && vkd3d_native_sync_handle_is_valid(*latencyEvent)) {
+
+                if (unlikely(!m_watchdogSpawned.load(std::memory_order_relaxed) && !m_watchdogSpawned.exchange(true)))
+                    m_watchdogThread = dxvk::thread([this] { watchdogThreadFunc(); });
+
+                // we cannot wait here. If there is already a frame "enqueued",
+                // simply overwrite it. We want to only have one frame in flight
+                // between the sleep and the first gpu submission.
+                // todo: make this switch together atomically
+
+                m_frameInfo.cpuId = m_frameSync.cpuStarted + 1;
+                m_frameInfo.latencyEvent = latencyEvent;
+
+                m_signal.signal_one();
+
+            }
+        }
+
         bool isActive() {
 
             if (m_presentCounter < 32)
@@ -124,7 +145,7 @@ namespace pacer {
                 }
 
                 if (usingWaitableSwapchain) {
-                    _INFO( "setting m_new->start \n" );
+                    _INFO( "setting m_new->start for id %" PRIu64 " \n", newId );
                     m_new->start = dxvk::high_resolution_clock::now();
                 }
 

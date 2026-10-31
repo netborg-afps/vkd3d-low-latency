@@ -1487,6 +1487,9 @@ static HRESULT STDMETHODCALLTYPE d3d12_amd_ext_anti_lag_UpdateAntiLagState(
     const struct AmdAntiLagAPIData_v1 *v1 = pData;
     const struct AmdAntiLagAPIData_v2 *v2 = pData;
 
+    if (device->pacer_device)
+        return AMD_AntiLag2_UpdateAntiLagState( device->pacer_device, pData );
+
     /* Don't try to use LL2 and AMD anti-lag at the same time. */
     if (!device->device_info.anti_lag_amd.antiLag || device->vk_info.NV_low_latency2)
         return S_OK;
