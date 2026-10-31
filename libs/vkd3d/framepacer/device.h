@@ -10,6 +10,7 @@ namespace pacer {
     class CommandQueue;
     class VulkanQueue;
     class NvApi_PacingAdapter;
+    class AMD_AntiLag2_PacingAdapter;
     class FramePacer;
 
     struct Swapchain {
@@ -49,6 +50,7 @@ namespace pacer {
         CalibratedDeviceTimestamps m_calibratedDeviceTimestamps;
 
         NvApi_PacingAdapter* m_nvApi_pacingAdapter;
+        AMD_AntiLag2_PacingAdapter* m_AntiLag2_pacingAdapter;
 
         // todo: make those two atomic together
         std::atomic< void* > m_activeSwapchain = { nullptr };

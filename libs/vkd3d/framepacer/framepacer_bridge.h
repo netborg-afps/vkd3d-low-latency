@@ -72,6 +72,8 @@ void NvAPI_setSleepMode( pacer_device_handle handle, bool enable, UINT32 minimum
 void NvAPI_setLatencyMarker( pacer_device_handle handle, uint64_t frameId, VkLatencyMarkerNV marker );
 void NvAPI_sleep( pacer_device_handle handle );
 
+HRESULT AMD_AntiLag2_UpdateAntiLagState( pacer_device_handle handle, void *pData );
+
 uint64_t pacer_command_queue_notify_submit( pacer_command_queue_handle command_queue );
 void     pacer_command_queue_notify_vulkan_submit( pacer_command_queue_handle command_queue, uint64_t command_submit_id, uint64_t vulkan_submit_id );
 

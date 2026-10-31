@@ -112,7 +112,7 @@ namespace pacer {
 
             _INFO( "set gpuFinished to %" PRIu64 " \n", m_frameSync.gpuFinished.load() );
 
-            if (m_device->m_activeType == Device::NVIDIA_Reflex) {
+            if (m_device->m_activeType != Device::WaitableDXGISwapchain) {
                 uint64_t frameId = m_frameMapping.getFrameId( gpuId );
                 if (frameId == 0) {
                     _WARN( "frame with gpuId %" PRIu64 " not tracked correctly, ignoring. Missing marker? \n", gpuId );

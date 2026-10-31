@@ -2,7 +2,6 @@
 
 #include "device.h"
 #include "framepacer.h"
-#include "nvapi_pacing_adapter.h"
 #include "util/sync/sync_ringbuffer_allocator.h"
 #include "util/util_time.h"
 #include "util/util_likely.h"
