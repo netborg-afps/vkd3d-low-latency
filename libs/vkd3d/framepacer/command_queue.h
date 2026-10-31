@@ -1,7 +1,6 @@
 #pragma once
 #include "vulkan_queue.h"
 #include "device.h"
-#include "nvapi_pacing_adapter.h"
 #include "util/util_time.h"
 
 namespace pacer {
@@ -30,6 +29,7 @@ namespace pacer {
 
         // we need to support multithreaded access here
         uint64_t notifySubmit() {
+            m_device->m_pacer->checkForCpuStart();
             uint64_t id = m_submitCounter++;
             m_submits[id % NUM_SUBMITS] = high_resulution_clock::now();
             m_vulkanQueueIds[id % NUM_SUBMITS] = INVALID_ID;

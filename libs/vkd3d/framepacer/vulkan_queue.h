@@ -2,7 +2,6 @@
 
 #include "device.h"
 #include "framepacer.h"
-#include "nvapi_pacing_adapter.h"
 #include "util/sync/sync_ringbuffer_allocator.h"
 #include "util/util_time.h"
 #include "util/util_likely.h"
@@ -328,6 +327,8 @@ namespace pacer {
                     waitInfo.pSemaphores = item.waitSemaphores.data();
                     waitInfo.pValues = item.waitSemaphoreValues.data();
 
+                    _INFO( "%" PRIu64 " vkWaitSemaphores() \n", item.submitId );
+
                     VkResult res = m_device->m_vkProcs.vkWaitSemaphores(
                         m_device->m_properties.vk_device,
                         &waitInfo, UINT64_MAX);
@@ -340,9 +341,12 @@ namespace pacer {
                 }
 
                 uint64_t gpuTimestamp;
+                _INFO( "%" PRIu64 " vkGetQueryPoolResults() \n", item.submitId );
                 getQueryPoolResult( item.queryPool, &gpuTimestamp );
                 m_gpuExecutionStart[ item.submitId % NUM_SUBMITS ].store(gpuTimestamp);
                 freeQueryPoolTopOfPipe( item.queryPool );
+
+                _INFO( "%" PRIu64 " gpu timestamp %" PRIu64 " \n", item.submitId, gpuTimestamp );
 
             }
         }

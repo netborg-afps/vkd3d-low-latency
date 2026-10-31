@@ -4,6 +4,7 @@
 #include "command_queue.h"
 #include "vulkan_queue.h"
 #include "nvapi_pacing_adapter.h"
+#include "anti_lag_2_pacing_adapter.h"
 extern "C" {
 #include "config_flags.h"
 #include <vkd3d_d3d12.h>
@@ -16,6 +17,7 @@ namespace pacer {
     : m_properties(*properties), m_vkProcs(*vkProcs), m_calibratedDeviceTimestamps(this) {
         m_pacer = new FramePacer(this, 2);
         m_nvApi_pacingAdapter = new NvApi_PacingAdapter(this);
+        m_AntiLag2_pacingAdapter = new AMD_AntiLag2_PacingAdapter(this);
         if (VKD3D_CONFIG_FLAG_IS_SET(PACER_DEBUG))
             enableLog = true;
     }

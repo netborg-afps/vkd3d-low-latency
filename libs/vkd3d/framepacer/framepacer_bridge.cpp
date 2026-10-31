@@ -2,6 +2,8 @@
 #include "device.h"
 #include "command_queue.h"
 #include "vulkan_queue.h"
+#include "nvapi_pacing_adapter.h"
+#include "anti_lag_2_pacing_adapter.h"
 #include "sleep_value_filter.h"
 #include "util/util_log.h"
 #include "util/util_debug.h"
@@ -19,7 +21,7 @@ bool pacer_is_running( pacer_device_handle device ) {
     assert(device);
 
     Device::type_t activeType = DEVICE(device)->m_activeType.load(std::memory_order_acquire);
-    if (activeType == Device::NVIDIA_Reflex)
+    if (activeType != Device::WaitableDXGISwapchain)
         return true;
 
     assert (activeType == Device::WaitableDXGISwapchain);
@@ -111,9 +113,24 @@ void pacer_vulkan_queue_push_query_pool_wait_semaphores(  pacer_vulkan_queue_han
 void NvAPI_setSleepMode( pacer_device_handle handle, bool enable, UINT32 minimum_interval_us ) {
     assert(handle);
     g_NvApi_sleepEnabled.store( enable, std::memory_order_release );
-    DEVICE(handle)->m_activeType.store(
-        enable ? Device::NVIDIA_Reflex : Device::WaitableDXGISwapchain,
-        std::memory_order_release );
+
+    if (enable) {
+        Device::type_t expected = Device::WaitableDXGISwapchain;
+        if (DEVICE(handle)->m_activeType.load() == expected) {
+            bool res = DEVICE(handle)->m_activeType.compare_exchange_strong(
+                expected, Device::NVIDIA_Reflex, std::memory_order_acq_rel);
+            if (res)
+                INFO( "NVIDIA Reflex enabled \n" );
+        }
+    } else {
+        Device::type_t expected = Device::NVIDIA_Reflex;
+        if (DEVICE(handle)->m_activeType.load() == expected) {
+            bool res = DEVICE(handle)->m_activeType.compare_exchange_strong(
+                expected, Device::WaitableDXGISwapchain, std::memory_order_acq_rel);
+            if (res)
+                INFO( "NVIDIA Reflex disabled \n" );
+        }
+    }
 
     // games (UE5!) seem to spam garbage which we need to filter
     g_sleepValueFilter.push(minimum_interval_us);
@@ -131,6 +148,11 @@ void NvAPI_sleep( pacer_device_handle handle ) {
     assert(handle);
     if (g_NvApi_sleepEnabled)
         DEVICE(handle)->m_nvApi_pacingAdapter->sleepAndBeginFrame();
+}
+
+HRESULT AMD_AntiLag2_UpdateAntiLagState( pacer_device_handle handle, void *pData ) {
+    assert(handle);
+    return DEVICE(handle)->m_AntiLag2_pacingAdapter->updateAntiLagState(pData);
 }
 
 uint64_t pacer_notify_present( pacer_device_handle device, void* vkd3d_swapchain ) {

@@ -158,14 +158,18 @@ namespace pacer {
 
             CalibratedDeviceTimestamps::Calibration calibration = m_device->m_calibratedDeviceTimestamps.getCalibration();
 
+            int counter = 0;
             std::vector< Submit >& submits = m_tempSubmits;
             submits.clear();
             for (SubmitIterator& iter : submitIters) {
                 while (!iter.isAtEnd()) {
+                    ++counter;
                     uint64_t gpuTimestampStart = iter.getVulkanGpuExecutionStart();
                     uint64_t gpuTimestamp = iter.getVulkanGpuExecutionEnd();
                     if (!gpuTimestamp || !gpuTimestampStart) { // frame-overlapping submit
                         ++iter;
+                        WARN( "submit discarded #%i, GPU timestamps %" PRIu64 ", %" PRIu64 "\n",
+                            counter, gpuTimestampStart, gpuTimestamp );
                         continue;
                     }
                     Submit s;
@@ -393,6 +397,8 @@ namespace pacer {
 
 
         int32_t getCpuDelay( const SyncProps& props, const InFlight& inFlight, time_point now, time_point lastStart ) const {
+
+            return 0;
 
             // todo: create our own markers, we don't have to rely on NvAPI markers
             if (props.renderStart == 0 || props.renderEnd == 0) {
