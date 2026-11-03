@@ -68,12 +68,12 @@ void pacer_command_queue_notify_vulkan_submit( pacer_command_queue_handle comman
 }
 
 
-void pacer_queue_notify_gpu_execution_end( struct pacer_queues pacer_queues, uint64_t command_submit_id, uint64_t vulkan_submit_id, struct pacer_query_pool* query_pool ) {
+void pacer_queue_notify_gpu_execution_end( struct pacer_queues pacer_queues, uint64_t command_submit_id, uint64_t vulkan_submit_id, struct pacer_query_pool* query_pool_top_of_pipe, struct pacer_query_pool* query_pool ) {
     CommandQueue* commandQueue = COMMAND_QUEUE(pacer_queues.command_queue);
     VulkanQueue* vulkanQueue = VULKAN_QUEUE(pacer_queues.vulkan_queue);
     assert( commandQueue );
     assert( vulkanQueue );
-    vulkanQueue->notifyGpuExecutionEnd(vulkan_submit_id, query_pool);
+    vulkanQueue->notifyGpuExecutionEnd(vulkan_submit_id, query_pool_top_of_pipe, query_pool);
     commandQueue->notifyVulkanGpuExecutionEnd(command_submit_id, vulkan_submit_id);
 }
 
@@ -91,6 +91,11 @@ struct pacer_query_pool* pacer_vulkan_queue_alloc_query_pool( pacer_vulkan_queue
 void pacer_vulkan_queue_free_query_pool( pacer_vulkan_queue_handle vulkan_queue,  struct pacer_query_pool* query_pool) {
     assert(vulkan_queue);
     VULKAN_QUEUE(vulkan_queue)->freeQueryPool( query_pool );
+}
+
+void pacer_vulkan_queue_free_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue,  struct pacer_query_pool* query_pool) {
+    assert(vulkan_queue);
+    VULKAN_QUEUE(vulkan_queue)->freeQueryPoolTopOfPipe( query_pool );
 }
 
 struct pacer_query_pool* pacer_vulkan_queue_alloc_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue ) {

@@ -283,6 +283,7 @@ struct vkd3d_fence_wait_info
     uint64_t vk_semaphore_value;
     uint64_t pacer_command_submit_id;
     uint64_t pacer_vulkan_submit_id;
+    struct pacer_query_pool* pacer_query_pool_top_of_pipe;
     struct pacer_query_pool* pacer_query_pool;
     vkd3d_waiting_fence_callback release_callback;
     unsigned char userdata[32];
