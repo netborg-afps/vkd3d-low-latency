@@ -50,7 +50,7 @@ namespace pacer {
             uint16_t vulkanIndex = vulkanId % VulkanQueue::NUM_SUBMITS;
             uint64_t t_gpu;
             if ( vulkanId != INVALID_ID
-                && (t_gpu = m_vulkanQueue->m_gpuExecutionEnd[vulkanIndex].load(std::memory_order_acquire))
+                && (t_gpu = m_vulkanQueue->m_gpuExecutionEnd[vulkanIndex].load(std::memory_order_acquire)) != UINT64_MAX
                 && m_presentFlags[index].exchange(false)) {
                 m_device->m_pacer->finishRender(t_gpu);
             }
@@ -62,7 +62,7 @@ namespace pacer {
             uint16_t index = commandId % NUM_SUBMITS;
             uint64_t t_gpu;
             if (m_presentFlags[index].load(std::memory_order_acquire)
-                && (t_gpu = m_vulkanQueue->m_gpuExecutionEnd[vulkanId % VulkanQueue::NUM_SUBMITS].load(std::memory_order_acquire))
+                && (t_gpu = m_vulkanQueue->m_gpuExecutionEnd[vulkanId % VulkanQueue::NUM_SUBMITS].load(std::memory_order_acquire)) != UINT64_MAX
                 && m_presentFlags[index].exchange(false)) {
                 m_device->m_pacer->finishRender(t_gpu);
             }
@@ -75,6 +75,8 @@ namespace pacer {
 
         static constexpr uint16_t INVALID_ID = 0xFFFF;
         static constexpr uint16_t NUM_SUBMITS = 2048;
+
+        static_assert(std::atomic<time_point>::is_always_lock_free);
 
         std::array<std::atomic<time_point>, NUM_SUBMITS> m_submits;
         std::array<std::atomic<uint16_t>, NUM_SUBMITS>   m_vulkanQueueIds;

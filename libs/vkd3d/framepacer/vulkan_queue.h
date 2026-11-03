@@ -51,8 +51,8 @@ namespace pacer {
             uint64_t id = m_submitCounter.load();
             uint16_t index = id % NUM_SUBMITS;
             m_submits[index] = high_resolution_clock::now();
-            m_gpuExecutionStart[index] = 0;
-            m_gpuExecutionEnd[index] = 0;
+            m_gpuExecutionStart[index] = UINT64_MAX;
+            m_gpuExecutionEnd[index] = UINT64_MAX;
             ++m_submitCounter;
             return id;
 
