@@ -48,12 +48,12 @@ namespace pacer {
         // we expect to handle one thread only here
         uint64_t notifySubmit( ) {
 
-            uint64_t id = m_submitCounter.load();
+            uint64_t id = m_submitCounter.load( std::memory_order_relaxed );
             uint16_t index = id % NUM_SUBMITS;
             m_submits[index] = high_resolution_clock::now();
-            m_gpuExecutionStart[index] = UINT64_MAX;
-            m_gpuExecutionEnd[index] = UINT64_MAX;
-            ++m_submitCounter;
+            m_gpuExecutionStart[index].store( UINT64_MAX, std::memory_order_release );
+            m_gpuExecutionEnd[index].store( UINT64_MAX, std::memory_order_release );
+            m_submitCounter.store( id + 1, std::memory_order_release );
             return id;
 
         }
