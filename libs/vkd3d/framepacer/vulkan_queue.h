@@ -31,17 +31,11 @@ namespace pacer {
         static constexpr uint16_t NUM_SUBMITS = 2048;
 
         VulkanQueue( Device* device, const Properties& properties )
-            : m_properties( properties ), m_device( device ),
-              m_thread([this] { threadFunc(); }) {
+            : m_properties( properties ), m_device( device ) {
             initVulkanObjects();
         }
 
         ~VulkanQueue() {
-            {   std::lock_guard<dxvk::mutex> lock(m_mutex);
-                m_stopped.store( true );
-                m_cond.notify_one();
-            }
-            m_thread.join();
             destroyVulkanObjects();
         }
 
@@ -58,17 +52,22 @@ namespace pacer {
 
         }
 
-        uint64_t notifyGpuExecutionEnd( uint64_t vulkanId, pacer_query_pool* queryPool ) {
-
-            if (queryPool == nullptr)
-                return 0;
+        void notifyGpuExecutionEnd( uint64_t vulkanId, pacer_query_pool* queryPoolTopOfPipe, pacer_query_pool* queryPool ) {
 
             uint64_t index = vulkanId % NUM_SUBMITS;
             uint64_t timestamp;
-            getQueryPoolResult(queryPool, &timestamp);
-            m_gpuExecutionEnd[index].store( timestamp, std::memory_order_release );
-            freeQueryPool(queryPool);
-            return timestamp;
+
+            if (queryPoolTopOfPipe) {
+                getQueryPoolResult(queryPoolTopOfPipe, &timestamp);
+                m_gpuExecutionStart[index].store( timestamp, std::memory_order_release );
+                freeQueryPoolTopOfPipe(queryPoolTopOfPipe);
+            }
+
+            if (queryPool) {
+                getQueryPoolResult(queryPool, &timestamp);
+                m_gpuExecutionEnd[index].store( timestamp, std::memory_order_release );
+                freeQueryPool(queryPool);
+            }
 
         }
 
@@ -88,82 +87,48 @@ namespace pacer {
         }
 
         void pushQueryPoolTopOfPipe( pacer_query_pool* queryPool, uint64_t submitId, VkSemaphore waitSemaphore, uint64_t waitValue, bool pushIntoQueue ) {
-
-            if (unlikely(!pushIntoQueue)) {
-                // might trigger an out-of-order return log error, should be harmless / todo
-                freeQueryPoolTopOfPipe( queryPool );
-                m_waitSemaphores.clear();
-                m_waitSemaphoreValues.clear();
-                return;
-            }
-
-            m_waitSemaphores.push_back( waitSemaphore );
-            m_waitSemaphoreValues.push_back( waitValue );
-            std::lock_guard<dxvk::mutex> lock(m_mutex);
-            m_queryQueue.push( {queryPool, submitId, std::move(m_waitSemaphores), std::move(m_waitSemaphoreValues)} );
-            m_cond.notify_one();
-
+            /*
+             * todo: Reading top-of-pipe timestamps in a separate thread currently doesn't work correctly on RADV
+             *   because its vkWaitSemaphores() implementation wakes us up way too late. Delays of more than 10 ms
+             *   have been observed. Some kind of reactive wait is needed though for this thread to work efficiently.
+             *   Will be reactivated once we work on the GPU Progress feature. By then we have to figure out
+             *   how to deal with the Mesa/RADV path. Was working without such delays on the NVIDIA driver (615.78.08).
+             */
         }
 
-        void pushQueryPoolWaitSemaphores( const VkSemaphoreSubmitInfo* pWaitSemaphoreInfos, uint32_t waitSemaphoreInfoCount ) {
+        void pushQueryPoolWaitSemaphores( const VkSemaphoreSubmitInfo* pWaitSemaphoreInfos, uint32_t waitSemaphoreInfoCount ) { }
 
-            m_waitSemaphores.clear();
-            m_waitSemaphoreValues.clear();
+        void freeQueryPoolTopOfPipe(pacer_query_pool* queryPool) {
 
-            // copy relevant semaphore info into m_waitSemaphores/Values, ignoring stage masks
+            if (queryPool == nullptr)
+                return;
+            m_queryPoolsTopOfPipe.free( queryPool );
 
-            for (uint32_t i=0; i<waitSemaphoreInfoCount; ++i) {
-
-                VkSemaphore semaphore = pWaitSemaphoreInfos[i].semaphore;
-                uint64_t semaphoreValue = pWaitSemaphoreInfos[i].value;
-
-                uint64_t index = UINT64_MAX;
-                size_t size = m_waitSemaphores.size();
-                for (size_t j=0; j<size; ++j) {
-                    if (m_waitSemaphores[j] == semaphore) {
-                        index = j;
-                        break;
-                    }
-                }
-
-                if (index != UINT64_MAX) {
-                    m_waitSemaphoreValues[index] = std::max( semaphoreValue, m_waitSemaphoreValues[index] );
-                    continue;
-                }
-
-                m_waitSemaphores.push_back( semaphore );
-                m_waitSemaphoreValues.push_back( semaphoreValue );
-
-            }
         }
 
         void freeQueryPool(pacer_query_pool* queryPool) {
 
-            assert( queryPool );
+            if (queryPool == nullptr)
+                return;
             m_queryPoolsBottomOfPipe.free( queryPool );
 
         }
 
     private:
 
-        void freeQueryPoolTopOfPipe(pacer_query_pool* queryPool) {
-
-            assert( queryPool );
-            m_queryPoolsTopOfPipe.free( queryPool );
-
-        }
-
         VkResult getQueryPoolResult( pacer_query_pool* queryPool, uint64_t* timestamp ) const {
 
             assert( queryPool );
             VkQueryResultFlags flags = VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT;
             VkResult res = m_device->m_vkProcs.vkGetQueryPoolResults(
-              m_device->m_properties.vk_device, queryPool->pool, 0, 1, sizeof(uint64_t),
-              timestamp, sizeof(uint64_t), flags
+                m_device->m_properties.vk_device, queryPool->pool, 0, 1, sizeof(uint64_t),
+                timestamp, sizeof(uint64_t), flags
             );
 
-            if (unlikely(res != VK_SUCCESS))
+            if (unlikely(res != VK_SUCCESS)) {
                 ERR( "FramePacer: vkGetQueryPoolResults returned %u \n", res);
+                *timestamp = UINT64_MAX;
+            }
 
             return res;
 
@@ -299,93 +264,23 @@ namespace pacer {
 
         }
 
-        void threadFunc() {
-
-            dxvk::setThreadName("vkd3d_top_of_pipe_timestamp");
-
-            while (!m_stopped.load( std::memory_order_acquire)) {
-
-                QueueItem item;
-                {   std::unique_lock<dxvk::mutex> lock(m_mutex);
-                    m_cond.wait( lock, [this] {
-                        return m_stopped.load() || !m_queryQueue.empty();
-                    });
-
-                    if (m_stopped.load())
-                        return;
-
-                    item = std::move(m_queryQueue.front());
-                    m_queryQueue.pop();
-                }
-
-                assert( item.queryPool );
-                assert( item.waitSemaphores.size() == item.waitSemaphoreValues.size() );
-
-                if (!item.waitSemaphores.empty()) {
-                    VkSemaphoreWaitInfo waitInfo {};
-                    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-                    waitInfo.semaphoreCount = item.waitSemaphores.size();
-                    waitInfo.pSemaphores = item.waitSemaphores.data();
-                    waitInfo.pValues = item.waitSemaphoreValues.data();
-
-                    VkResult res = m_device->m_vkProcs.vkWaitSemaphores(
-                        m_device->m_properties.vk_device,
-                        &waitInfo, UINT64_MAX);
-
-                    if (res) {
-                        ERR("Failed to wait for semaphores in top-of-pipe timestamp thread, vr %d.\n", res);
-                        freeQueryPoolTopOfPipe( item.queryPool );
-                        continue;
-                    }
-                }
-
-                uint64_t gpuTimestamp;
-                getQueryPoolResult( item.queryPool, &gpuTimestamp );
-                m_gpuExecutionStart[ item.submitId % NUM_SUBMITS ].store(gpuTimestamp);
-                freeQueryPoolTopOfPipe( item.queryPool );
-
-            }
-        }
-
-        static_assert(std::atomic<time_point>::is_always_lock_free);
 
         Device* m_device;
 
         // is accessed from multiple threads
+
         std::array<time_point, NUM_SUBMITS> m_submits = { };
         std::array<std::atomic<uint64_t>, NUM_SUBMITS> m_gpuExecutionStart = { };
         std::array<std::atomic<uint64_t>, NUM_SUBMITS> m_gpuExecutionEnd = { };
         std::atomic<uint64_t> m_submitCounter = { 1 };
 
+        VkCommandPool m_commandPool = { VK_NULL_HANDLE };
+
         // holding the elements in a lockfree ringbuffer has the advantage
         // that we can check if we truely cycle through the pools in order
-        // alternative would be a lockfree stack, which potentially could be
-        // faster but we would miss this assertive checking
-        VkCommandPool m_commandPool = { VK_NULL_HANDLE };
 
         sync::RingbufferAllocator<pacer_query_pool, 256> m_queryPoolsTopOfPipe;
         sync::RingbufferAllocator<pacer_query_pool, 256> m_queryPoolsBottomOfPipe;
-
-        typedef dxvk::small_vector< VkSemaphore, 8 > semaphore_vector;
-        typedef dxvk::small_vector< uint64_t, 8 > semaphore_value_vector;
-
-        semaphore_vector m_waitSemaphores;
-        semaphore_value_vector m_waitSemaphoreValues;
-
-        // threading for top of pipe timestamps
-
-        struct QueueItem {
-            pacer_query_pool* queryPool;
-            uint64_t submitId;
-            semaphore_vector waitSemaphores;
-            semaphore_value_vector waitSemaphoreValues;
-        };
-
-        std::atomic<bool> m_stopped = { false };
-        dxvk::thread m_thread;
-        dxvk::condition_variable m_cond;
-        dxvk::mutex m_mutex;
-        std::queue<QueueItem> m_queryQueue;
 
     };
 }

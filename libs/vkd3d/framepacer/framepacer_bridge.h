@@ -75,12 +75,13 @@ void NvAPI_sleep( pacer_device_handle handle );
 uint64_t pacer_command_queue_notify_submit( pacer_command_queue_handle command_queue );
 void     pacer_command_queue_notify_vulkan_submit( pacer_command_queue_handle command_queue, uint64_t command_submit_id, uint64_t vulkan_submit_id );
 
-void     pacer_queue_notify_gpu_execution_end( struct pacer_queues pacer_queues, uint64_t command_submit_id, uint64_t vulkan_submit_id, struct pacer_query_pool* query_pool );
+void     pacer_queue_notify_gpu_execution_end( struct pacer_queues pacer_queues, uint64_t command_submit_id, uint64_t vulkan_submit_id, struct pacer_query_pool* query_pool_top_of_pipe, struct pacer_query_pool* query_pool );
 
 uint64_t pacer_vulkan_queue_notify_submit( pacer_vulkan_queue_handle vulkan_queue );
 struct pacer_query_pool* pacer_vulkan_queue_alloc_query_pool( pacer_vulkan_queue_handle vulkan_queue );
 struct pacer_query_pool* pacer_vulkan_queue_alloc_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue );
 void pacer_vulkan_queue_free_query_pool( pacer_vulkan_queue_handle vulkan_queue,  struct pacer_query_pool* query_pool);
+void pacer_vulkan_queue_free_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue,  struct pacer_query_pool* query_pool);
 void pacer_vulkan_queue_push_query_pool_top_of_pipe( pacer_vulkan_queue_handle vulkan_queue, struct pacer_query_pool* query_pool, uint64_t vulkan_submit_id, VkSemaphore wait_semaphore, uint64_t wait_value, bool push_into_queue );
 void pacer_vulkan_queue_push_query_pool_wait_semaphores(  pacer_vulkan_queue_handle vulkan_queue, const VkSemaphoreSubmitInfo* pWaitSemaphoreInfos, uint32_t waitSemaphoreInfoCount );
 

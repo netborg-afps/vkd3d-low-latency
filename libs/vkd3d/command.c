@@ -664,6 +664,7 @@ static void vkd3d_wait_for_gpu_timeline_semaphore(struct vkd3d_fence_worker *wor
                     worker->queue->pacer_queues,
                     fence->fence_info.pacer_command_submit_id,
                     fence->fence_info.pacer_vulkan_submit_id,
+                    fence->fence_info.pacer_query_pool_top_of_pipe,
                     fence->fence_info.pacer_query_pool);
             }
 
@@ -677,6 +678,7 @@ static void vkd3d_wait_for_gpu_timeline_semaphore(struct vkd3d_fence_worker *wor
                 worker->queue->pacer_queues,
                 fence->fence_info.pacer_command_submit_id,
                 fence->fence_info.pacer_vulkan_submit_id,
+                fence->fence_info.pacer_query_pool_top_of_pipe,
                 fence->fence_info.pacer_query_pool);
         }
 
@@ -25855,10 +25857,8 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
         fence_info.vk_semaphore_value = signal_semaphore_infos[0].value;
         fence_info.pacer_command_submit_id = exec->pacer_command_submit_id;
         fence_info.pacer_vulkan_submit_id = exec->pacer_vulkan_submit_id;
+        fence_info.pacer_query_pool_top_of_pipe = query_pool_top_of_pipe;
         fence_info.pacer_query_pool = query_pool;
-
-//        _INFO("registering fence info: command_id %"
-//            PRIu64 ", vulkan_id %" PRIu64 " \n", fence_info.pacer_command_submit_id, fence_info.pacer_vulkan_submit_id);
 
         submission_info = vkd3d_waiting_fence_set_callback(&fence_info,
                 &vkd3d_waiting_fence_release_submission, sizeof(*submission_info));
@@ -25868,11 +25868,10 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
         if (FAILED(hr = vkd3d_enqueue_timeline_semaphore(&command_queue->fence_worker, &fence_info, &exec->timeline_cookie)))
         {
             ERR("Failed to enqueue timeline semaphore.\n");
-            if (query_pool)
-            {
-                // might trigger an out-of-order return log error, should be harmless
-                pacer_vulkan_queue_free_query_pool( command_queue->pacer_queues.vulkan_queue, query_pool );
-            }
+            // might trigger an out-of-order return log error, should be harmless
+            pacer_vulkan_queue_free_query_pool_top_of_pipe( command_queue->pacer_queues.vulkan_queue, query_pool_top_of_pipe );
+            pacer_vulkan_queue_free_query_pool( command_queue->pacer_queues.vulkan_queue, query_pool );
+            query_pool_top_of_pipe = NULL;
         }
     }
 
