@@ -1,6 +1,7 @@
 #pragma once
 #include "vulkan_queue.h"
 #include "device.h"
+#include "nvapi_pacing_adapter.h"
 #include "util/util_time.h"
 
 namespace pacer {

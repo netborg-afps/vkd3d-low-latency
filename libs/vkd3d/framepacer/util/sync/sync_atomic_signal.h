@@ -38,9 +38,12 @@ namespace pacer::sync {
         // waits until m_flag becomes != false
         bool res = WaitOnAddress(&m_flag, (void*) &m_flagFalse, 1, timeout);
 
-        if (unlikely(!res))
-          ERR("WaitOnAddress failed \n"); //. LastError: ", GetLastError()));
+        if (unlikely(!res)) {
+            if (GetLastError() == ERROR_TIMEOUT)
+                break;
 
+          ERR("WaitOnAddress failed \n"); //. LastError: ", GetLastError()));
+        }
       }
 
       _atomic_signal_debug( std::string("finish wait for ") + m_name );

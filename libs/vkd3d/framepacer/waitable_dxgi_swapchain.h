@@ -74,12 +74,14 @@ namespace pacer {
         }
 
 
-        void alternativeSleep( vkd3d_native_sync_handle* latencyEvent ) {
+        void alternativeSleep( sync::AtomicSignal* signal ) {//    vkd3d_native_sync_handle* latencyEvent ) {
 
-            if (latencyEvent && vkd3d_native_sync_handle_is_valid(*latencyEvent)) {
+//            if (latencyEvent && vkd3d_native_sync_handle_is_valid(*latencyEvent)) {
 
-                if (unlikely(!m_watchdogSpawned.load(std::memory_order_relaxed) && !m_watchdogSpawned.exchange(true)))
-                    m_watchdogThread = dxvk::thread([this] { watchdogThreadFunc(); });
+            m_markerLessSignal = signal;
+//
+//                if (unlikely(!m_watchdogSpawned.load(std::memory_order_relaxed) && !m_watchdogSpawned.exchange(true)))
+//                    m_watchdogThread = dxvk::thread([this] { watchdogThreadFunc(); });
 
                 // we cannot wait here. If there is already a frame "enqueued",
                 // simply overwrite it. We want to only have one frame in flight
@@ -87,11 +89,11 @@ namespace pacer {
                 // todo: make this switch together atomically
 
                 m_frameInfo.cpuId = m_frameSync.cpuStarted + 1;
-                m_frameInfo.latencyEvent = latencyEvent;
+//                m_frameInfo.latencyEvent = latencyEvent;
 
                 m_signal.signal_one();
 
-            }
+//            }
         }
 
         bool isActive() {
@@ -118,36 +120,56 @@ namespace pacer {
                 if (m_stopped.load(std::memory_order_acquire))
                     return;
 
-                vkd3d_native_sync_handle* latencyEvent = m_frameInfo.latencyEvent;
+//                vkd3d_native_sync_handle* latencyEvent = m_frameInfo.latencyEvent;
 
                 uint64_t cpuId = m_frameInfo.cpuId;
                 uint64_t newId = cpuId + 1;
+                newId = cpuId; // if not waitable swapchain
 
                 LatencyMarkers* m_new = m_latencyMarkers.getMarkers( newId );
                 LatencyMarkers* m_prev = m_latencyMarkers.getMarkers( cpuId-1 );
-                m_sleep( newId, m_prev->cpuFinished );
 
-                bool usingWaitableSwapchain = true;
-                ++m_presentCounterWaitableObject;
-                if (WaitForSingleObject((*latencyEvent).handle, 0) == WAIT_OBJECT_0) {
-                    usingWaitableSwapchain = false;
-                    --m_presentCounterWaitableObject;
+                time_point prevFrameStart = m_prev->cpuFinished; // for waitable swapchain mode
+                // todo: make this cleaner
+                prevFrameStart = m_latencyMarkers.getMarkers( cpuId )->start;
+
+                static std::atomic<int> numSleep = 0;
+                ++numSleep;
+                _INFO("num parallel sleeps: %i \n", numSleep.load());
+                m_sleep( newId, prevFrameStart );//m_prev->cpuFinished );
+                --numSleep;
+
+                if ( m_markerLessSignal == nullptr ) {
+                     m_new->start = dxvk::high_resolution_clock::now();
+                    m_ready.signal_one();
+                    continue;
                 }
-                while (WaitForSingleObject((*latencyEvent).handle, 0) == WAIT_OBJECT_0)
-                    { }
-                vkd3d_native_sync_handle_release(*latencyEvent, 1);
+
+                m_markerLessSignal->signal_one();
+
+//                m_sleep( newId, m_prev->cpuFinished );
+//
+//                bool usingWaitableSwapchain = true;
+//                ++m_presentCounterWaitableObject;
+//                if (WaitForSingleObject((*latencyEvent).handle, 0) == WAIT_OBJECT_0) {
+//                    usingWaitableSwapchain = false;
+//                    --m_presentCounterWaitableObject;
+//                }
+//                while (WaitForSingleObject((*latencyEvent).handle, 0) == WAIT_OBJECT_0)
+//                    { }
+//                vkd3d_native_sync_handle_release(*latencyEvent, 1);
 
                 WatchdogContext context;
-                context.latencyEvent = latencyEvent;
+                context.latencyEvent = nullptr;//latencyEvent;
                 context.t = dxvk::high_resolution_clock::now();
                 {   std::lock_guard<dxvk::mutex> lock(m_watchdogMutex);
                     m_watchdogContext = context;
                 }
 
-                if (usingWaitableSwapchain) {
+//                if (usingWaitableSwapchain) {
                     _INFO( "setting m_new->start for id %" PRIu64 " \n", newId );
                     m_new->start = dxvk::high_resolution_clock::now();
-                }
+//                }
 
                 m_ready.signal_one();
 
@@ -204,6 +226,7 @@ namespace pacer {
         uint64_t m_presentCounterPrint = { 32 };
 
         dxvk::thread m_thread;
+        sync::AtomicSignal* m_markerLessSignal = { nullptr };
 
         // watchdog
 

@@ -28,6 +28,7 @@ namespace pacer {
         for (VulkanQueue* vulkanQueue : m_vulkanQueues)
             delete vulkanQueue;
         delete m_nvApi_pacingAdapter;
+        delete m_AntiLag2_pacingAdapter;
         delete m_pacer;
     }
 

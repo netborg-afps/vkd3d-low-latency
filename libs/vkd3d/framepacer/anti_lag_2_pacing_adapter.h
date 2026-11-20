@@ -47,8 +47,13 @@ namespace pacer {
 //                    now = dxvk::high_resolution_clock::now();
 //                    m_lastEndSleep.store( now, std::memory_order_release );
 //                }
-                if (m_device->m_activeType.load() == Device::AMD_AntiLag2)
-                    WaitForSingleObject( m_device->m_pacer->m_waitMarkerlessHandle.handle, UINT32_MAX );
+                if (m_device->m_activeType.load() == Device::AMD_AntiLag2) {
+                    _INFO("wait on sleep \n");
+//                    WaitForSingleObject( m_device->m_pacer->m_waitMarkerlessHandle.handle, UINT32_MAX );
+                    m_device->m_pacer->m_waitMarkerlessSignal.wait( 150 );
+                    _INFO("wait on sleep ended \n");
+                }
+
 
                 return S_OK;
             }

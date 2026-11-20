@@ -83,8 +83,8 @@ namespace pacer {
 
         void checkForCpuStart() {
 
-            if (m_device->m_activeType.load(std::memory_order_relaxed) != Device::AMD_AntiLag2)
-                return;
+//            if (m_device->m_activeType.load(std::memory_order_relaxed) != Device::AMD_AntiLag2)
+//                return;
 
             uint64_t curCpu = m_frameSync.cpuFinished + 1;
             if (likely(m_frameSync.cpuStarted >= curCpu))
@@ -94,8 +94,10 @@ namespace pacer {
                 return;
             }
 
-//            m_isMarkerless.store( true, std::memory_order_release );
-            m_waitMarkerless.alternativeSleep( &m_waitMarkerlessHandle );
+            _INFO( "cpuStarted = %" PRIu64 " \n", curCpu );
+
+            if (m_device->m_activeType == Device::AMD_AntiLag2)
+                m_waitMarkerless.alternativeSleep( &m_waitMarkerlessSignal );
 
         }
 
@@ -257,7 +259,8 @@ namespace pacer {
 
         std::atomic<bool> m_isMarkerless = { false };
         WaitableDXGISwapchain m_waitMarkerless;
-        vkd3d_native_sync_handle m_waitMarkerlessHandle;
+//        vkd3d_native_sync_handle m_waitMarkerlessHandle;
+        sync::AtomicSignal m_waitMarkerlessSignal = { "markerlessSignal", false };
 
     private:
 
