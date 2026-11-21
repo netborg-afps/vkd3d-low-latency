@@ -45,13 +45,13 @@ namespace pacer {
         void notifyPresent( void* vkd3d_swapchain ) {
             uint16_t index = (m_submitCounter-1) % NUM_SUBMITS;
             m_device->m_pacer->finishCpu();
-            m_presentFlags[ index ].store( true, std::memory_order_release );
+            m_presentFlags[ index ].store( true );
 
-            uint64_t vulkanId = m_vulkanQueueIds[index].load(std::memory_order_acquire);
+            uint64_t vulkanId = m_vulkanQueueIds[index].load();
             uint16_t vulkanIndex = vulkanId % VulkanQueue::NUM_SUBMITS;
             uint64_t t_gpu;
             if ( vulkanId != INVALID_ID
-                && (t_gpu = m_vulkanQueue->m_gpuExecutionEnd[vulkanIndex].load(std::memory_order_acquire)) != UINT64_MAX
+                && (t_gpu = m_vulkanQueue->m_gpuExecutionEnd[vulkanIndex].load()) != UINT64_MAX
                 && m_presentFlags[index].exchange(false)) {
                 m_device->m_pacer->finishRender(t_gpu);
             }
@@ -62,8 +62,8 @@ namespace pacer {
         void notifyVulkanGpuExecutionEnd( uint64_t commandId, uint64_t vulkanId ) {
             uint16_t index = commandId % NUM_SUBMITS;
             uint64_t t_gpu;
-            if (m_presentFlags[index].load(std::memory_order_acquire)
-                && (t_gpu = m_vulkanQueue->m_gpuExecutionEnd[vulkanId % VulkanQueue::NUM_SUBMITS].load(std::memory_order_acquire)) != UINT64_MAX
+            if (m_presentFlags[index].load()
+                && (t_gpu = m_vulkanQueue->m_gpuExecutionEnd[vulkanId % VulkanQueue::NUM_SUBMITS].load()) != UINT64_MAX
                 && m_presentFlags[index].exchange(false)) {
                 m_device->m_pacer->finishRender(t_gpu);
             }

@@ -58,13 +58,13 @@ namespace pacer {
 
             if (queryPoolTopOfPipe) {
                 getQueryPoolResult(queryPoolTopOfPipe, &timestamp);
-                m_gpuExecutionStart[index].store( timestamp, std::memory_order_release );
+                m_gpuExecutionStart[index].store( timestamp );
                 freeQueryPoolTopOfPipe(queryPoolTopOfPipe);
             }
 
             if (queryPool) {
                 getQueryPoolResult(queryPool, &timestamp);
-                m_gpuExecutionEnd[index].store( timestamp, std::memory_order_release );
+                m_gpuExecutionEnd[index].store( timestamp );
                 freeQueryPool(queryPool);
             }
 
